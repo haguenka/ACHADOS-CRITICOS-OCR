@@ -302,12 +302,28 @@ class DashboardAchadosCriticos:
 
             center_penalty = abs((x + w / 2) - image_w / 2) / image_w
             top_bonus = max(0, (image_h * 0.55 - y)) / image_h
-            score = area + (rectangularity * area * 0.4) + (top_bonus * area * 0.2) - (center_penalty * area * 0.8)
+            left_bias_bonus = max(0, (image_w * 0.7 - x)) / image_w
+            score = (
+                area
+                + (rectangularity * area * 0.4)
+                + (top_bonus * area * 0.25)
+                + (left_bias_bonus * area * 0.15)
+                - (center_penalty * area * 0.25)
+            )
             if score > best_score:
                 best_score = score
                 best_rect = (x, y, x + w, y + h)
 
         return best_rect
+
+    def _fallback_ris_dialog_bounds(self, image_width, image_height):
+        """Fallback geométrico para screenshots do RIS com grande borda externa."""
+        return (
+            int(image_width * 0.11),
+            int(image_height * 0.14),
+            int(image_width * 0.62),
+            int(image_height * 0.62),
+        )
 
     def _relative_box_to_pixels(self, reference_box, relative_box, image_width, image_height):
         """Converte caixa relativa ao dialogo para pixels absolutos."""
@@ -517,7 +533,7 @@ class DashboardAchadosCriticos:
             dialog_box = self._detect_ris_dialog_bounds(image)
 
             if not dialog_box:
-                return None, "Nao foi possivel localizar automaticamente a janela 'Resultado Critico' no screenshot."
+                dialog_box = self._fallback_ris_dialog_bounds(width, height)
 
             extracted_rows = []
 
