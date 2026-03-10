@@ -127,14 +127,14 @@ ADMIN_SMTP_CONFIG = {
 
 # Regioes relativas ao dialogo "Resultado Critico".
 RIS_DIALOG_FIELD_REGIONS = [
-    {"field": "Resultado Crítico", "box": (0.22, 0.10, 0.46, 0.19), "multiline": False},
-    {"field": "Contato", "box": (0.17, 0.21, 0.52, 0.30), "multiline": False},
-    {"field": "Contato com (Sucesso)", "box": (0.74, 0.21, 0.91, 0.30), "multiline": False},
-    {"field": "Data e Hora", "box": (0.29, 0.42, 0.60, 0.53), "multiline": False},
-    {"field": "Observações", "box": (0.17, 0.55, 0.92, 0.88), "multiline": True},
+    {"field": "Resultado Crítico", "box": (0.17, 0.12, 0.40, 0.20), "multiline": False},
+    {"field": "Contato", "box": (0.16, 0.22, 0.56, 0.31), "multiline": False},
+    {"field": "Contato com (Sucesso)", "box": (0.78, 0.22, 0.97, 0.31), "multiline": False},
+    {"field": "Data e Hora", "box": (0.18, 0.42, 0.55, 0.54), "multiline": False},
+    {"field": "Observações", "box": (0.16, 0.56, 0.95, 0.89), "multiline": True},
 ]
 
-RIS_DIAGNOSIS_RELATIVE_BOX = (0.28, -0.28, 1.03, -0.10)
+RIS_DIAGNOSIS_RELATIVE_BOX = (-0.07, -0.19, 0.43, -0.07)
 
 RIS_FIELD_OCR_RULES = {
     "Diagnóstico": {
@@ -320,10 +320,10 @@ class DashboardAchadosCriticos:
     def _fallback_ris_dialog_bounds(self, image_width, image_height):
         """Fallback geométrico para screenshots do RIS com grande borda externa."""
         return (
-            int(image_width * 0.11),
+            int(image_width * 0.05),
             int(image_height * 0.14),
-            int(image_width * 0.62),
-            int(image_height * 0.62),
+            int(image_width * 0.88),
+            int(image_height * 0.91),
         )
 
     def _relative_box_to_pixels(self, reference_box, relative_box, image_width, image_height):
@@ -567,9 +567,15 @@ class DashboardAchadosCriticos:
             image = Image.open(io.BytesIO(uploaded_image.getvalue()))
             width, height = image.size
             dialog_box = self._detect_ris_dialog_bounds(image)
+            fallback_box = self._fallback_ris_dialog_bounds(width, height)
 
-            if not dialog_box:
-                dialog_box = self._fallback_ris_dialog_bounds(width, height)
+            if dialog_box:
+                det_area = max(1, (dialog_box[2] - dialog_box[0]) * (dialog_box[3] - dialog_box[1]))
+                fallback_area = max(1, (fallback_box[2] - fallback_box[0]) * (fallback_box[3] - fallback_box[1]))
+                if det_area < fallback_area * 0.55:
+                    dialog_box = fallback_box
+            else:
+                dialog_box = fallback_box
 
             extracted_rows = []
             debug_items = []
