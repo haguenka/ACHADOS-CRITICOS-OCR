@@ -21,4 +21,4 @@ COPY . /app
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "streamlit run dashboard_achados_criticos.py --server.address 0.0.0.0 --server.port ${PORT:-10000} --server.headless true --browser.gatherUsageStats false --theme.base dark --theme.primaryColor '#667eea' --theme.backgroundColor '#0e1117' --theme.secondaryBackgroundColor '#262730'"]
+CMD ["sh", "-c", "streamlit run dashboard_achados_criticos.py --server.address 0.0.0.0 --server.port ${PORT:-10000} --server.headless true --server.enableCORS=false --server.enableXsrfProtection=false --server.maxUploadSize=400 --browser.gatherUsageStats false --theme.base dark --theme.primaryColor '#667eea' --theme.backgroundColor '#0e1117' --theme.secondaryBackgroundColor '#262730'"]
