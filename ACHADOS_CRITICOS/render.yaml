@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: cdi-achados-criticos-dashboard
+    runtime: docker
+    dockerContext: ./
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: STREAMLIT_SERVER_ENABLE_CORS
+        value: "false"
+      - key: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
+        value: "false"
+      - key: TESSERACT_CMD
+        value: /usr/bin/tesseract
