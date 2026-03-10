@@ -19,6 +19,7 @@ import shutil
 import smtplib
 from email.message import EmailMessage
 from pathlib import Path
+from PIL import ImageFilter
 
 # Configuração da página
 st.set_page_config(
@@ -134,6 +135,39 @@ RIS_FIELD_REGIONS = [
     {"field": "Observações", "box": (327, 346, 678, 426), "multiline": True},
 ]
 
+RIS_FIELD_OCR_RULES = {
+    "Diagnóstico": {
+        "psm": 7,
+        "scale": 5,
+        "whitelist": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÀÁÂÃÉÊÍÓÔÕÚÇàáâãéêíóôõúç, -:",
+    },
+    "Resultado Crítico": {
+        "psm": 7,
+        "scale": 5,
+        "whitelist": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÀÁÂÃÉÊÍÓÔÕÚÇàáâãéêíóôõúç ",
+    },
+    "Contato": {
+        "psm": 7,
+        "scale": 5,
+        "whitelist": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÀÁÂÃÉÊÍÓÔÕÚÇàáâãéêíóôõúç ",
+    },
+    "Contato com (Sucesso)": {
+        "psm": 7,
+        "scale": 6,
+        "whitelist": "SsIiMmNnAaOoÃãÕõ",
+    },
+    "Data e Hora": {
+        "psm": 7,
+        "scale": 6,
+        "whitelist": "0123456789/:- ",
+    },
+    "Observações": {
+        "psm": 6,
+        "scale": 4,
+        "whitelist": None,
+    },
+}
+
 class DashboardAchadosCriticos:
     def __init__(self):
         self.df_achados = None
@@ -236,12 +270,103 @@ class DashboardAchadosCriticos:
         cleaned = " ".join(str(text).replace("\n", " ").split())
         return cleaned.replace("|", "").strip(" :-")
 
+    def _normalize_ris_datetime(self, text):
+        """Normaliza data/hora para padrão DD/MM/AAAA HH:MM quando possível."""
+        cleaned = self._clean_ocr_text(text)
+        cleaned = cleaned.replace("\\", "/").replace(".", ":")
+        cleaned = re.sub(r"[^0-9/: -]", "", cleaned)
+        match = re.search(r"(\d{2}/\d{2}/\d{2,4})(?:\s+(\d{2}:\d{2}))?", cleaned)
+        if not match:
+            return cleaned
+
+        date_part = match.group(1)
+        time_part = match.group(2)
+        try:
+            if len(date_part.split("/")[-1]) == 2:
+                dt = datetime.strptime(date_part, "%d/%m/%y")
+            else:
+                dt = datetime.strptime(date_part, "%d/%m/%Y")
+            formatted = dt.strftime("%d/%m/%Y")
+            return f"{formatted} {time_part}".strip() if time_part else formatted
+        except ValueError:
+            return cleaned
+
+    def _score_ris_candidate(self, field_name, text):
+        """Pontua o resultado OCR de acordo com o formato esperado do campo."""
+        cleaned = self._clean_ocr_text(text)
+        if not cleaned:
+            return -100
+
+        score = len(cleaned)
+
+        if field_name == "Diagnóstico":
+            if re.search(r"[A-Za-zÀ-ÿ]+,\s*[A-Za-zÀ-ÿ]+", cleaned):
+                score += 40
+            if ":" in cleaned:
+                score += 10
+            if re.search(r"\d", cleaned):
+                score -= 20
+
+        elif field_name == "Resultado Crítico":
+            if re.fullmatch(r"[A-Za-zÀ-ÿ ]{3,40}", cleaned):
+                score += 25
+            if re.search(r"\d", cleaned):
+                score -= 20
+
+        elif field_name == "Contato":
+            if re.fullmatch(r"[A-Za-zÀ-ÿ ]{5,60}", cleaned):
+                score += 30
+            if len(cleaned.split()) >= 2:
+                score += 10
+            if re.search(r"\d", cleaned):
+                score -= 25
+
+        elif field_name == "Contato com (Sucesso)":
+            lowered = cleaned.lower()
+            if lowered in {"sim", "não", "nao"}:
+                score += 50
+            else:
+                score -= 30
+
+        elif field_name == "Data e Hora":
+            if re.search(r"\d{2}/\d{2}/\d{2,4}", cleaned):
+                score += 40
+            if re.search(r"\d{2}:\d{2}", cleaned):
+                score += 20
+
+        elif field_name == "Observações":
+            if len(cleaned) >= 15:
+                score += 20
+
+        return score
+
+    def _prepare_ris_variants(self, crop, field_name):
+        """Gera variantes da imagem para aumentar a precisão do OCR."""
+        rules = RIS_FIELD_OCR_RULES.get(field_name, {})
+        scale = rules.get("scale", 4)
+
+        base = crop.convert("L")
+        base = base.filter(ImageFilter.SHARPEN)
+        base = base.resize((max(1, base.width * scale), max(1, base.height * scale)))
+
+        variants = []
+
+        hard = base.copy().point(lambda p: 255 if p > 165 else 0)
+        variants.append(hard)
+
+        soft = base.copy().point(lambda p: 255 if p > 145 else 0)
+        variants.append(soft)
+
+        variants.append(base.copy())
+        return variants
+
     def _post_process_ris_text(self, field_name, text):
         """Ajusta o texto extraido para o significado esperado na tabela."""
         cleaned = self._clean_ocr_text(text)
 
         if field_name == "Diagnóstico":
             cleaned = re.sub(r"^\s*diagn[oó]stico\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s+[xX]\s*$", "", cleaned).strip()
 
         if field_name == "Contato com (Sucesso)":
             lowered = cleaned.lower()
@@ -250,45 +375,69 @@ class DashboardAchadosCriticos:
             if "nao" in lowered or "não" in lowered:
                 return "Não"
 
+        if field_name == "Data e Hora":
+            return self._normalize_ris_datetime(cleaned)
+
         return cleaned
 
-    def _ocr_ris_region(self, image, box, multiline=False):
+    def _ocr_ris_region(self, image, box, field_name, multiline=False):
         """Executa OCR em uma regiao da tela RIS."""
-        from PIL import ImageOps
-
         crop = image.crop(box)
-        crop = ImageOps.grayscale(crop)
-        crop = ImageOps.autocontrast(crop)
-        crop = crop.resize((crop.width * 2, crop.height * 2))
-        crop = crop.point(lambda p: 255 if p > 155 else 0)
+        rules = RIS_FIELD_OCR_RULES.get(field_name, {})
+        variants = self._prepare_ris_variants(crop, field_name)
 
         if self.ris_ocr_backend == "tesseract":
             import pytesseract
 
-            psm = "6" if multiline else "7"
-            text = pytesseract.image_to_string(
-                crop,
-                lang="por+eng",
-                config=f"--oem 3 --psm {psm}"
-            )
-            return self._clean_ocr_text(text)
+            best_text = ""
+            best_score = -1000
+            psm = str(rules.get("psm", 6 if multiline else 7))
+            whitelist = rules.get("whitelist")
+            config_base = f"--oem 3 --psm {psm} -c preserve_interword_spaces=1"
+            if whitelist:
+                config_base += f' -c tessedit_char_whitelist="{whitelist}"'
+
+            for variant in variants:
+                text = pytesseract.image_to_string(
+                    variant,
+                    lang="por+eng",
+                    config=config_base
+                )
+                score = self._score_ris_candidate(field_name, text)
+                if score > best_score:
+                    best_score = score
+                    best_text = text
+
+            return self._clean_ocr_text(best_text)
 
         if self.ris_ocr_backend == "rapidocr":
-            image_array = np.array(crop.convert("RGB"))
-            result = self._rapidocr_engine(
-                image_array,
-                use_det=False,
-                use_cls=False,
-                use_rec=True
-            )
-            texts = getattr(result, "txts", None)
-            if texts is None and isinstance(result, tuple) and result:
-                texts = result[0]
-            if not texts:
-                return ""
-            if isinstance(texts, str):
-                return self._clean_ocr_text(texts)
-            return self._clean_ocr_text(" ".join(str(item) for item in texts if item))
+            best_text = ""
+            best_score = -1000
+
+            for variant in variants:
+                image_array = np.array(variant.convert("RGB"))
+                result = self._rapidocr_engine(
+                    image_array,
+                    use_det=False,
+                    use_cls=False,
+                    use_rec=True
+                )
+                texts = getattr(result, "txts", None)
+                if texts is None and isinstance(result, tuple) and result:
+                    texts = result[0]
+                if isinstance(texts, str):
+                    text = texts
+                elif texts:
+                    text = " ".join(str(item) for item in texts if item)
+                else:
+                    text = ""
+
+                score = self._score_ris_candidate(field_name, text)
+                if score > best_score:
+                    best_score = score
+                    best_text = text
+
+            return self._clean_ocr_text(best_text)
 
         return ""
 
@@ -307,7 +456,12 @@ class DashboardAchadosCriticos:
             extracted_rows = []
             for region in RIS_FIELD_REGIONS:
                 scaled_box = self._scale_ris_box(region["box"], width, height)
-                text = self._ocr_ris_region(image, scaled_box, multiline=region.get("multiline", False))
+                text = self._ocr_ris_region(
+                    image,
+                    scaled_box,
+                    region["field"],
+                    multiline=region.get("multiline", False)
+                )
                 extracted_rows.append({
                     "Campo": region["field"],
                     "Valor": self._post_process_ris_text(region["field"], text)
