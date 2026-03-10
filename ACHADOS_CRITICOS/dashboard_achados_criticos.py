@@ -127,14 +127,15 @@ ADMIN_SMTP_CONFIG = {
 
 # Regioes relativas ao dialogo "Resultado Critico".
 RIS_DIALOG_FIELD_REGIONS = [
-    {"field": "Resultado Crítico", "box": (0.17, 0.12, 0.40, 0.20), "multiline": False},
-    {"field": "Contato", "box": (0.16, 0.22, 0.56, 0.31), "multiline": False},
-    {"field": "Contato com (Sucesso)", "box": (0.78, 0.22, 0.97, 0.31), "multiline": False},
-    {"field": "Data e Hora", "box": (0.18, 0.42, 0.55, 0.54), "multiline": False},
-    {"field": "Observações", "box": (0.16, 0.56, 0.95, 0.89), "multiline": True},
+    {"field": "Resultado Crítico", "box": (0.29, 0.12, 0.69, 0.20), "multiline": False},
+    {"field": "Contato", "box": (0.20, 0.25, 0.59, 0.34), "multiline": False},
+    {"field": "Contato com (Sucesso)", "box": (0.84, 0.25, 0.995, 0.34), "multiline": False},
+    {"field": "Achado Crítico", "box": (0.18, 0.39, 0.98, 0.48), "multiline": False},
+    {"field": "Data e Hora", "box": (0.19, 0.53, 0.58, 0.65), "multiline": False},
+    {"field": "Observações", "box": (0.18, 0.66, 0.995, 0.96), "multiline": True},
 ]
 
-RIS_DIAGNOSIS_RELATIVE_BOX = (-0.07, -0.19, 0.43, -0.07)
+RIS_DIAGNOSIS_RELATIVE_BOX = (-0.24, -0.205, 0.36, -0.075)
 
 RIS_FIELD_OCR_RULES = {
     "Diagnóstico": {
@@ -156,6 +157,11 @@ RIS_FIELD_OCR_RULES = {
         "psm": 7,
         "scale": 6,
         "whitelist": "SsIiMmNnAaOoÃãÕõ",
+    },
+    "Achado Crítico": {
+        "psm": 7,
+        "scale": 4,
+        "whitelist": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÀÁÂÃÉÊÍÓÔÕÚÇàáâãéêíóôõúç0123456789/:,.-() ",
     },
     "Data e Hora": {
         "psm": 7,
@@ -422,6 +428,12 @@ class DashboardAchadosCriticos:
             if re.search(r"\d", cleaned):
                 score -= 20
 
+        elif field_name == "Achado Crítico":
+            if len(cleaned) >= 12:
+                score += 25
+            if re.search(r"[A-Za-zÀ-ÿ]{4,}", cleaned):
+                score += 20
+
         elif field_name == "Contato":
             if re.fullmatch(r"[A-Za-zÀ-ÿ ]{5,60}", cleaned):
                 score += 30
@@ -482,12 +494,18 @@ class DashboardAchadosCriticos:
             elif len(cleaned) < 5 or len(re.findall(r"[A-Za-zÀ-ÿ]", cleaned)) < 4:
                 return ""
 
+        if field_name == "Resultado Crítico":
+            cleaned = re.sub(r"^\s*(resultado\s*critico|comunicado)\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+
         if field_name == "Contato com (Sucesso)":
             lowered = cleaned.lower()
             if "sim" in lowered:
                 return "Sim"
             if "nao" in lowered or "não" in lowered:
                 return "Não"
+
+        if field_name == "Achado Crítico":
+            cleaned = re.sub(r"^\s*achado\s*critico\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE)
 
         if field_name == "Data e Hora":
             return self._normalize_ris_datetime(cleaned)
