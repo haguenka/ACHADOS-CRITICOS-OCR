@@ -124,16 +124,16 @@ ADMIN_SMTP_CONFIG = {
     "tesseract_cmd": os.environ.get("TESSERACT_CMD", "/usr/bin/tesseract"),
 }
 
-# Regioes relativas ao layout RIS mostrado pelo usuario.
-RIS_SCREEN_BASE_SIZE = (2048, 1365)
-RIS_FIELD_REGIONS = [
-    {"field": "Diagnóstico", "box": (371, 160, 760, 191), "multiline": False},
-    {"field": "Resultado Crítico", "box": (376, 245, 481, 268), "multiline": False},
-    {"field": "Contato", "box": (327, 266, 479, 291), "multiline": False},
-    {"field": "Contato com (Sucesso)", "box": (589, 265, 678, 291), "multiline": False},
-    {"field": "Data e Hora", "box": (327, 319, 560, 346), "multiline": False},
-    {"field": "Observações", "box": (327, 346, 678, 426), "multiline": True},
+# Regioes relativas ao dialogo "Resultado Critico".
+RIS_DIALOG_FIELD_REGIONS = [
+    {"field": "Resultado Crítico", "box": (0.22, 0.10, 0.46, 0.19), "multiline": False},
+    {"field": "Contato", "box": (0.17, 0.21, 0.52, 0.30), "multiline": False},
+    {"field": "Contato com (Sucesso)", "box": (0.74, 0.21, 0.91, 0.30), "multiline": False},
+    {"field": "Data e Hora", "box": (0.29, 0.42, 0.60, 0.53), "multiline": False},
+    {"field": "Observações", "box": (0.17, 0.55, 0.92, 0.88), "multiline": True},
 ]
+
+RIS_DIAGNOSIS_RELATIVE_BOX = (0.28, -0.28, 1.03, -0.10)
 
 RIS_FIELD_OCR_RULES = {
     "Diagnóstico": {
@@ -254,16 +254,73 @@ class DashboardAchadosCriticos:
 
         return False, f"{tesseract_error} {rapidocr_error}".strip()
 
-    def _scale_ris_box(self, box, width, height):
-        """Escala a regiao OCR para a resolucao da imagem enviada."""
-        base_w, base_h = RIS_SCREEN_BASE_SIZE
-        x1, y1, x2, y2 = box
-        return (
-            int(x1 * width / base_w),
-            int(y1 * height / base_h),
-            int(x2 * width / base_w),
-            int(y2 * height / base_h),
-        )
+    def _detect_ris_dialog_bounds(self, image):
+        """Localiza automaticamente a janela 'Resultado Crítico' no screenshot."""
+        try:
+            import cv2
+        except Exception:
+            return None
+
+        rgb = np.array(image.convert("RGB"))
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+
+        # Dialogo: baixo contraste de saturacao e brilho mais alto que o fundo.
+        mask = cv2.inRange(hsv, np.array([0, 0, 95]), np.array([180, 90, 235]))
+        kernel = np.ones((7, 7), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        image_h, image_w = rgb.shape[:2]
+        best_rect = None
+        best_score = -1
+
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            area = w * h
+            if area < image_w * image_h * 0.01:
+                continue
+            if area > image_w * image_h * 0.35:
+                continue
+            if w < image_w * 0.15 or h < image_h * 0.10:
+                continue
+            if y > image_h * 0.75:
+                continue
+            if x < image_w * 0.02 or y < image_h * 0.02:
+                continue
+            if (x + w) > image_w * 0.98 or (y + h) > image_h * 0.98:
+                continue
+
+            aspect_ratio = w / max(h, 1)
+            if not 1.1 <= aspect_ratio <= 3.8:
+                continue
+
+            contour_area = cv2.contourArea(contour)
+            rectangularity = contour_area / max(area, 1)
+            if rectangularity < 0.55:
+                continue
+
+            center_penalty = abs((x + w / 2) - image_w / 2) / image_w
+            top_bonus = max(0, (image_h * 0.55 - y)) / image_h
+            score = area + (rectangularity * area * 0.4) + (top_bonus * area * 0.2) - (center_penalty * area * 0.8)
+            if score > best_score:
+                best_score = score
+                best_rect = (x, y, x + w, y + h)
+
+        return best_rect
+
+    def _relative_box_to_pixels(self, reference_box, relative_box, image_width, image_height):
+        """Converte caixa relativa ao dialogo para pixels absolutos."""
+        ref_x1, ref_y1, ref_x2, ref_y2 = reference_box
+        ref_w = ref_x2 - ref_x1
+        ref_h = ref_y2 - ref_y1
+        rel_x1, rel_y1, rel_x2, rel_y2 = relative_box
+
+        x1 = max(0, int(ref_x1 + (rel_x1 * ref_w)))
+        y1 = max(0, int(ref_y1 + (rel_y1 * ref_h)))
+        x2 = min(image_width, int(ref_x1 + (rel_x2 * ref_w)))
+        y2 = min(image_height, int(ref_y1 + (rel_y2 * ref_h)))
+        return (x1, y1, x2, y2)
 
     def _clean_ocr_text(self, text):
         """Normaliza o texto extraido por OCR."""
@@ -367,6 +424,11 @@ class DashboardAchadosCriticos:
         if field_name == "Diagnóstico":
             cleaned = re.sub(r"^\s*diagn[oó]stico\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE)
             cleaned = re.sub(r"\s+[xX]\s*$", "", cleaned).strip()
+            match = re.search(r"([A-Za-zÀ-ÿ]+,\s*[A-Za-zÀ-ÿ ]+)", cleaned)
+            if match:
+                cleaned = match.group(1).strip()
+            elif len(cleaned) < 5 or len(re.findall(r"[A-Za-zÀ-ÿ]", cleaned)) < 4:
+                return ""
 
         if field_name == "Contato com (Sucesso)":
             lowered = cleaned.lower()
@@ -452,10 +514,22 @@ class DashboardAchadosCriticos:
 
             image = Image.open(io.BytesIO(uploaded_image.getvalue()))
             width, height = image.size
+            dialog_box = self._detect_ris_dialog_bounds(image)
+
+            if not dialog_box:
+                return None, "Nao foi possivel localizar automaticamente a janela 'Resultado Critico' no screenshot."
 
             extracted_rows = []
-            for region in RIS_FIELD_REGIONS:
-                scaled_box = self._scale_ris_box(region["box"], width, height)
+
+            diagnosis_box = self._relative_box_to_pixels(dialog_box, RIS_DIAGNOSIS_RELATIVE_BOX, width, height)
+            diagnosis_text = self._ocr_ris_region(image, diagnosis_box, "Diagnóstico", multiline=False)
+            extracted_rows.append({
+                "Campo": "Diagnóstico",
+                "Valor": self._post_process_ris_text("Diagnóstico", diagnosis_text)
+            })
+
+            for region in RIS_DIALOG_FIELD_REGIONS:
+                scaled_box = self._relative_box_to_pixels(dialog_box, region["box"], width, height)
                 text = self._ocr_ris_region(
                     image,
                     scaled_box,
