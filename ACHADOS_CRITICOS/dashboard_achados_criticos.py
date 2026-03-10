@@ -20,6 +20,7 @@ import smtplib
 from email.message import EmailMessage
 from pathlib import Path
 from PIL import ImageFilter
+from PIL import ImageDraw
 
 # Configuração da página
 st.set_page_config(
@@ -338,6 +339,41 @@ class DashboardAchadosCriticos:
         y2 = min(image_height, int(ref_y1 + (rel_y2 * ref_h)))
         return (x1, y1, x2, y2)
 
+    def _build_ris_debug_payload(self, image, dialog_box, extracted_items):
+        """Monta artefatos visuais para calibracao do OCR."""
+        annotated = image.convert("RGB").copy()
+        draw = ImageDraw.Draw(annotated)
+        draw.rectangle(dialog_box, outline=(0, 255, 255), width=3)
+
+        debug_fields = []
+        colors = [
+            (255, 0, 0),
+            (0, 255, 0),
+            (255, 255, 0),
+            (255, 128, 0),
+            (255, 0, 255),
+            (0, 200, 255),
+        ]
+
+        for idx, item in enumerate(extracted_items):
+            box = item["box"]
+            color = colors[idx % len(colors)]
+            draw.rectangle(box, outline=color, width=3)
+            draw.text((box[0] + 4, max(0, box[1] - 18)), item["field"], fill=color)
+            debug_fields.append({
+                "field": item["field"],
+                "box": box,
+                "raw_text": item["raw_text"],
+                "value": item["value"],
+                "crop": image.crop(box).copy(),
+            })
+
+        return {
+            "annotated_image": annotated,
+            "dialog_box": dialog_box,
+            "fields": debug_fields,
+        }
+
     def _clean_ocr_text(self, text):
         """Normaliza o texto extraido por OCR."""
         cleaned = " ".join(str(text).replace("\n", " ").split())
@@ -519,11 +555,11 @@ class DashboardAchadosCriticos:
 
         return ""
 
-    def extract_ris_screen_text(self, uploaded_image):
+    def extract_ris_screen_text(self, uploaded_image, include_debug=False):
         """Extrai campos preenchidos da tela RIS via OCR."""
         deps_ok, error_message = self._ocr_dependencies_ready()
         if not deps_ok:
-            return None, error_message
+            return None, error_message, None
 
         try:
             from PIL import Image
@@ -536,12 +572,20 @@ class DashboardAchadosCriticos:
                 dialog_box = self._fallback_ris_dialog_bounds(width, height)
 
             extracted_rows = []
+            debug_items = []
 
             diagnosis_box = self._relative_box_to_pixels(dialog_box, RIS_DIAGNOSIS_RELATIVE_BOX, width, height)
             diagnosis_text = self._ocr_ris_region(image, diagnosis_box, "Diagnóstico", multiline=False)
+            diagnosis_value = self._post_process_ris_text("Diagnóstico", diagnosis_text)
             extracted_rows.append({
                 "Campo": "Diagnóstico",
-                "Valor": self._post_process_ris_text("Diagnóstico", diagnosis_text)
+                "Valor": diagnosis_value
+            })
+            debug_items.append({
+                "field": "Diagnóstico",
+                "box": diagnosis_box,
+                "raw_text": diagnosis_text,
+                "value": diagnosis_value,
             })
 
             for region in RIS_DIALOG_FIELD_REGIONS:
@@ -552,14 +596,22 @@ class DashboardAchadosCriticos:
                     region["field"],
                     multiline=region.get("multiline", False)
                 )
+                value = self._post_process_ris_text(region["field"], text)
                 extracted_rows.append({
                     "Campo": region["field"],
-                    "Valor": self._post_process_ris_text(region["field"], text)
+                    "Valor": value
+                })
+                debug_items.append({
+                    "field": region["field"],
+                    "box": scaled_box,
+                    "raw_text": text,
+                    "value": value,
                 })
 
-            return pd.DataFrame(extracted_rows), None
+            debug_payload = self._build_ris_debug_payload(image, dialog_box, debug_items) if include_debug else None
+            return pd.DataFrame(extracted_rows), None, debug_payload
         except Exception as exc:
-            return None, f"Erro ao ler screenshot: {exc}"
+            return None, f"Erro ao ler screenshot: {exc}", None
 
     def _smtp_config_ready(self):
         """Valida a configuracao fixa de SMTP."""
@@ -662,12 +714,14 @@ class DashboardAchadosCriticos:
             type=["png", "jpg", "jpeg", "bmp", "tif", "tiff"],
             key="ris_screenshot"
         )
+        debug_mode = st.checkbox("Mostrar debug OCR", key="ris_debug_mode")
 
         if uploaded_image is not None:
             image_signature = f"{uploaded_image.name}:{uploaded_image.size}"
             if st.session_state.get("ris_image_signature") != image_signature:
                 st.session_state.ris_image_signature = image_signature
                 st.session_state.ris_extracted_df = pd.DataFrame(columns=["Campo", "Valor"])
+                st.session_state.ris_debug_payload = None
                 if "ris_editor" in st.session_state:
                     del st.session_state["ris_editor"]
 
@@ -679,11 +733,15 @@ class DashboardAchadosCriticos:
             with col_actions:
                 st.markdown("### Extracao")
                 if st.button("Ler Tela RIS", type="primary", key="ris_extract_button"):
-                    extracted_df, error_message = self.extract_ris_screen_text(uploaded_image)
+                    extracted_df, error_message, debug_payload = self.extract_ris_screen_text(
+                        uploaded_image,
+                        include_debug=debug_mode
+                    )
                     if error_message:
                         st.error(error_message)
                     else:
                         st.session_state.ris_extracted_df = extracted_df
+                        st.session_state.ris_debug_payload = debug_payload
                         backend_name = "Tesseract" if self.ris_ocr_backend == "tesseract" else "RapidOCR"
                         st.success(f"Leitura concluida. {len(extracted_df)} campo(s) foram enviados para revisao.")
                         st.caption(f"Backend OCR usado: {backend_name}")
@@ -725,6 +783,20 @@ class DashboardAchadosCriticos:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="ris_download_button"
                 )
+
+                debug_payload = st.session_state.get("ris_debug_payload")
+                if debug_mode and debug_payload:
+                    st.markdown("### Debug OCR")
+                    st.image(
+                        debug_payload["annotated_image"],
+                        caption="Caixa detectada e recortes usados no OCR",
+                        use_container_width=True
+                    )
+                    for item in debug_payload["fields"]:
+                        st.markdown(f"**{item['field']}**")
+                        st.image(item["crop"], use_container_width=True)
+                        st.caption(f"Bruto: {item['raw_text'] or '(vazio)'}")
+                        st.caption(f"Final: {item['value'] or '(vazio)'}")
             else:
                 st.info("Nenhum campo extraido ainda. Envie um screenshot e clique em 'Ler Tela RIS'.")
         else:
@@ -1614,6 +1686,8 @@ def main():
         st.session_state.ris_extracted_df = pd.DataFrame(columns=["Campo", "Valor"])
     if 'ris_image_signature' not in st.session_state:
         st.session_state.ris_image_signature = None
+    if 'ris_debug_payload' not in st.session_state:
+        st.session_state.ris_debug_payload = None
 
     dashboard = DashboardAchadosCriticos()
 
