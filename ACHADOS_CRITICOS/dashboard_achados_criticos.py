@@ -126,13 +126,12 @@ ADMIN_SMTP_CONFIG = {
 # Regioes relativas ao layout RIS mostrado pelo usuario.
 RIS_SCREEN_BASE_SIZE = (2048, 1365)
 RIS_FIELD_REGIONS = [
-    {"field": "Paciente / Diagnostico", "box": (371, 160, 681, 191), "multiline": False},
-    {"field": "Resultado Critico", "box": (376, 245, 481, 268), "multiline": False},
+    {"field": "Diagnóstico", "box": (371, 160, 760, 191), "multiline": False},
+    {"field": "Resultado Crítico", "box": (376, 245, 481, 268), "multiline": False},
     {"field": "Contato", "box": (327, 266, 479, 291), "multiline": False},
-    {"field": "Contato com", "box": (589, 265, 678, 291), "multiline": False},
-    {"field": "Achado", "box": (326, 291, 679, 317), "multiline": False},
-    {"field": "Data e Hora", "box": (327, 319, 480, 346), "multiline": False},
-    {"field": "Observacoes", "box": (327, 346, 678, 426), "multiline": True},
+    {"field": "Contato com (Sucesso)", "box": (589, 265, 678, 291), "multiline": False},
+    {"field": "Data e Hora", "box": (327, 319, 560, 346), "multiline": False},
+    {"field": "Observações", "box": (327, 346, 678, 426), "multiline": True},
 ]
 
 class DashboardAchadosCriticos:
@@ -237,6 +236,22 @@ class DashboardAchadosCriticos:
         cleaned = " ".join(str(text).replace("\n", " ").split())
         return cleaned.replace("|", "").strip(" :-")
 
+    def _post_process_ris_text(self, field_name, text):
+        """Ajusta o texto extraido para o significado esperado na tabela."""
+        cleaned = self._clean_ocr_text(text)
+
+        if field_name == "Diagnóstico":
+            cleaned = re.sub(r"^\s*diagn[oó]stico\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+
+        if field_name == "Contato com (Sucesso)":
+            lowered = cleaned.lower()
+            if "sim" in lowered:
+                return "Sim"
+            if "nao" in lowered or "não" in lowered:
+                return "Não"
+
+        return cleaned
+
     def _ocr_ris_region(self, image, box, multiline=False):
         """Executa OCR em uma regiao da tela RIS."""
         from PIL import ImageOps
@@ -295,7 +310,7 @@ class DashboardAchadosCriticos:
                 text = self._ocr_ris_region(image, scaled_box, multiline=region.get("multiline", False))
                 extracted_rows.append({
                     "Campo": region["field"],
-                    "Valor": text
+                    "Valor": self._post_process_ris_text(region["field"], text)
                 })
 
             return pd.DataFrame(extracted_rows), None
