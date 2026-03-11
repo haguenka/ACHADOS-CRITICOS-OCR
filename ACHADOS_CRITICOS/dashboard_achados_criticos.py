@@ -127,15 +127,15 @@ ADMIN_SMTP_CONFIG = {
 
 # Regioes relativas ao dialogo "Resultado Critico".
 RIS_DIALOG_FIELD_REGIONS = [
-    {"field": "Resultado Crítico", "box": (0.29, 0.12, 0.69, 0.20), "multiline": False},
+    {"field": "Resultado Crítico", "box": (0.31, 0.13, 0.70, 0.21), "multiline": False},
     {"field": "Contato", "box": (0.20, 0.25, 0.59, 0.34), "multiline": False},
-    {"field": "Contato com (Sucesso)", "box": (0.84, 0.25, 0.995, 0.34), "multiline": False},
-    {"field": "Achado Crítico", "box": (0.18, 0.39, 0.98, 0.48), "multiline": False},
-    {"field": "Data e Hora", "box": (0.19, 0.53, 0.58, 0.65), "multiline": False},
-    {"field": "Observações", "box": (0.18, 0.66, 0.995, 0.96), "multiline": True},
+    {"field": "Contato com (Sucesso)", "box": (0.88, 0.25, 0.995, 0.34), "multiline": False},
+    {"field": "Achado Crítico", "box": (0.18, 0.40, 0.98, 0.49), "multiline": False},
+    {"field": "Data e Hora", "box": (0.19, 0.48, 0.59, 0.58), "multiline": False},
+    {"field": "Observações", "box": (0.18, 0.70, 0.995, 0.96), "multiline": True},
 ]
 
-RIS_DIAGNOSIS_RELATIVE_BOX = (-0.24, -0.205, 0.36, -0.075)
+RIS_DIAGNOSIS_RELATIVE_BOX = (-0.24, -0.205, 0.24, -0.08)
 
 RIS_FIELD_OCR_RULES = {
     "Diagnóstico": {
