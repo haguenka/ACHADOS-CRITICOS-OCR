@@ -8,7 +8,7 @@ WORKDIR /app
 
 COPY requirements_dashboard.txt /app/requirements_dashboard.txt
 RUN pip install -r /app/requirements_dashboard.txt
-RUN python -c "import PIL, streamlit, plotly, pandas, xlrd, openpyxl, matplotlib; print('dashboard deps OK')"
+RUN python -c "import PIL, streamlit, plotly, pandas, xlrd, openpyxl; print('dashboard deps OK')"
 
 COPY . /app
 
