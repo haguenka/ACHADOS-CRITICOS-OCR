@@ -8,15 +8,13 @@ ENV TESSERACT_CMD=/usr/bin/tesseract
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 \
-    libglib2.0-0 \
     tesseract-ocr \
     tesseract-ocr-por \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements_dashboard.txt /app/requirements_dashboard.txt
 RUN pip install -r /app/requirements_dashboard.txt
-RUN python -c "import PIL, pytesseract, rapidocr_onnxruntime; print('OCR deps OK')"
+RUN python -c "import PIL, pytesseract, streamlit, plotly, pandas, xlrd, openpyxl; print('dashboard deps OK')"
 RUN tesseract --version
 
 COPY . /app
