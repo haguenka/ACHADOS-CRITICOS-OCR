@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements_dashboard.txt /app/requirements_dashboard.txt
 RUN pip install -r /app/requirements_dashboard.txt
-RUN python -c "import PIL, pytesseract, streamlit, plotly, pandas, xlrd, openpyxl; print('dashboard deps OK')"
+RUN python -c "import PIL, pytesseract, streamlit, plotly, pandas, xlrd, openpyxl, matplotlib; print('dashboard deps OK')"
 RUN tesseract --version
 
 COPY . /app
