@@ -3,19 +3,12 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
-ENV TESSERACT_CMD=/usr/bin/tesseract
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr \
-    tesseract-ocr-por \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements_dashboard.txt /app/requirements_dashboard.txt
 RUN pip install -r /app/requirements_dashboard.txt
-RUN python -c "import PIL, pytesseract, streamlit, plotly, pandas, xlrd, openpyxl, matplotlib; print('dashboard deps OK')"
-RUN tesseract --version
+RUN python -c "import PIL, streamlit, plotly, pandas, xlrd, openpyxl, matplotlib; print('dashboard deps OK')"
 
 COPY . /app
 

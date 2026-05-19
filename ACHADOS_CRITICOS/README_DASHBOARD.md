@@ -66,19 +66,6 @@ Configuração aplicada:
 - Porta dinâmica via variável `PORT` do Render
 - Compatível com upload de planilhas grandes (até 400 MB)
 
-### 2.2 Configurar envio por email
-O envio da tabela RIS usa variáveis de ambiente, sem senha fixa no código:
-
-```bash
-export SMTP_HOST="smtp.seu-dominio.com"
-export SMTP_PORT="587"
-export SMTP_USE_TLS="true"
-export SMTP_USERNAME="usuario@seu-dominio.com"
-export SMTP_PASSWORD="sua-senha"
-export SMTP_SENDER_EMAIL="no-reply@seu-dominio.com"
-export SMTP_SENDER_NAME="CDI - Achados Criticos"
-```
-
 ### 3. Usar o Dashboard
 1. **Acesse:** http://localhost:8501
 2. **Upload:** Carregue as duas planilhas na sidebar:

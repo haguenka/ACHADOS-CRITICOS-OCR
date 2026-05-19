@@ -290,6 +290,24 @@ class DashboardAchadosCriticos:
 
         return df_fmt
 
+    def _add_compliance_status_column(self, df):
+        """Adiciona coluna legível de compliance para tabelas e relatórios."""
+        df_status = df.copy()
+        if 'fora_do_prazo' in df_status.columns:
+            df_status['Status comunicação'] = df_status['fora_do_prazo'].map(
+                lambda value: 'Fora do prazo' if bool(value) else 'Dentro do prazo'
+            )
+        return df_status
+
+    def _style_compliance_status(self, value):
+        """Estilo visual para status de compliance no Streamlit."""
+        text_value = str(value).strip().lower()
+        if text_value == 'fora do prazo':
+            return 'background-color: #E74C3C; color: white; font-weight: 700;'
+        if text_value == 'dentro do prazo':
+            return 'background-color: #27AE60; color: white; font-weight: 700;'
+        return ''
+
     def _ocr_dependencies_ready(self):
         """Verifica se as dependencias de OCR estao disponiveis."""
         self.ris_ocr_backend = None
@@ -1861,11 +1879,25 @@ class DashboardAchadosCriticos:
 
         # Criar buffer para Excel
         output = io.BytesIO()
-        export_df = self._format_date_columns(self.df_correlacionado)
+        export_df = self._format_date_columns(
+            self._add_compliance_status_column(self.df_correlacionado)
+        )
 
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             # Sheet principal com dados correlacionados
             export_df.to_excel(writer, sheet_name='Dados_Correlacionados', index=False)
+            worksheet = writer.sheets['Dados_Correlacionados']
+            if 'Status comunicação' in export_df.columns:
+                from openpyxl.styles import Font, PatternFill
+
+                status_col_idx = list(export_df.columns).index('Status comunicação') + 1
+                green_fill = PatternFill(start_color='27AE60', end_color='27AE60', fill_type='solid')
+                red_fill = PatternFill(start_color='E74C3C', end_color='E74C3C', fill_type='solid')
+                white_font = Font(color='FFFFFF', bold=True)
+                for row_idx, value in enumerate(export_df['Status comunicação'], start=2):
+                    cell = worksheet.cell(row=row_idx, column=status_col_idx)
+                    cell.fill = red_fill if value == 'Fora do prazo' else green_fill
+                    cell.font = white_font
 
             # Sheet com estatísticas dos médicos
             if self.medico_col:
@@ -1944,6 +1976,9 @@ class DashboardAchadosCriticos:
             )
         if "Fora do prazo" in detail_df.columns:
             detail_df["Fora do prazo"] = detail_df["Fora do prazo"].map(lambda value: "SIM" if bool(value) else "Não")
+            detail_df["Status comunicação"] = detail_df["Fora do prazo"].map(
+                lambda value: "Fora do prazo" if str(value).strip().upper() == "SIM" else "Dentro do prazo"
+            )
 
         return detail_df
 
@@ -1954,13 +1989,249 @@ class DashboardAchadosCriticos:
             return text
         return "\n".join(textwrap.wrap(text, width=width, max_lines=3, placeholder="..."))
 
+    def _pdf_font(self, size, bold=False):
+        """Carrega fonte para PDF Pillow com fallback portavel."""
+        from PIL import ImageFont
+
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial Unicode.ttf",
+        ]
+        for path in candidates:
+            if path and os.path.exists(path):
+                try:
+                    return ImageFont.truetype(path, size=size)
+                except Exception:
+                    continue
+        try:
+            return ImageFont.load_default(size=size)
+        except TypeError:
+            return ImageFont.load_default()
+
+    def _draw_wrapped_pdf_text(self, draw, xy, text_value, font, fill, width_chars=24, line_height=22, max_lines=3):
+        """Desenha texto quebrado em linhas em uma pagina Pillow."""
+        text_value = "" if pd.isna(text_value) else str(text_value)
+        lines = textwrap.wrap(text_value, width=width_chars, max_lines=max_lines, placeholder="...")
+        x, y = xy
+        for line in lines or [""]:
+            draw.text((x, y), line, font=font, fill=fill)
+            y += line_height
+
+    def _create_pdf_report_pillow(self):
+        """Fallback de PDF dark mode sem matplotlib, usando apenas Pillow."""
+        from PIL import Image, ImageDraw
+
+        colors = {
+            "bg": (14, 17, 23),
+            "panel": (22, 27, 34),
+            "panel_alt": (17, 24, 32),
+            "grid": (48, 54, 61),
+            "text": (240, 246, 252),
+            "muted": (139, 148, 158),
+            "blue": (52, 152, 219),
+            "green": (39, 174, 96),
+            "red": (231, 76, 60),
+            "yellow": (241, 196, 15),
+            "orange": (230, 126, 34),
+            "purple": (142, 68, 173),
+            "white": (255, 255, 255),
+        }
+
+        page_w, page_h = 1600, 2200
+        margin = 70
+        pages = []
+        detail_df = self._pdf_detail_dataframe()
+
+        total = len(self.df_correlacionado)
+        no_prazo = int((~self.df_correlacionado['fora_do_prazo']).sum())
+        fora_prazo = int(self.df_correlacionado['fora_do_prazo'].sum())
+        compliance = (no_prazo / total * 100) if total else 0
+        tempo_mediano = self.df_correlacionado['tempo_comunicacao_horas'].median()
+
+        title_font = self._pdf_font(44, bold=True)
+        h2_font = self._pdf_font(28, bold=True)
+        metric_font = self._pdf_font(42, bold=True)
+        label_font = self._pdf_font(20, bold=False)
+        small_font = self._pdf_font(16, bold=False)
+        table_font = self._pdf_font(15, bold=False)
+        table_header_font = self._pdf_font(15, bold=True)
+
+        page = Image.new("RGB", (page_w, page_h), colors["bg"])
+        draw = ImageDraw.Draw(page)
+        draw.text((margin, 70), "CDI - Relatorio de Achados Criticos", font=title_font, fill=colors["text"])
+        draw.text(
+            (margin, 128),
+            f"{self._pdf_period_label()} | gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+            font=small_font,
+            fill=colors["muted"],
+        )
+
+        metric_data = [
+            ("Total", str(total), colors["blue"]),
+            ("No prazo", str(no_prazo), colors["green"]),
+            ("Fora do prazo", str(fora_prazo), colors["red"]),
+            ("Compliance", f"{compliance:.1f}%", colors["green"] if compliance >= 80 else colors["yellow"] if compliance >= 60 else colors["red"]),
+        ]
+        card_w = 350
+        card_h = 190
+        for idx, (label, value, color) in enumerate(metric_data):
+            x = margin + idx * (card_w + 22)
+            y = 220
+            draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=16, fill=colors["panel"], outline=colors["grid"], width=2)
+            draw.text((x + 28, y + 40), value, font=metric_font, fill=color)
+            draw.text((x + 28, y + 112), label, font=label_font, fill=colors["text"])
+            if label == "Compliance":
+                draw.text((x + 28, y + 148), f"Tempo mediano: {tempo_mediano:.2f}h", font=small_font, fill=colors["muted"])
+
+        # Donut/pie simples de compliance.
+        pie_box = (margin, 500, margin + 520, 1020)
+        draw.rounded_rectangle((margin, 455, margin + 680, 1090), radius=18, fill=colors["panel"], outline=colors["grid"], width=2)
+        draw.text((margin + 28, 485), "Compliance de Comunicacao", font=h2_font, fill=colors["text"])
+        if total > 0:
+            no_angle = int(360 * no_prazo / total)
+            draw.pieslice(pie_box, 90, 90 + no_angle, fill=colors["green"])
+            draw.pieslice(pie_box, 90 + no_angle, 450, fill=colors["red"])
+            inner = (margin + 135, 635, margin + 385, 885)
+            draw.ellipse(inner, fill=colors["panel"])
+            draw.text((margin + 205, 725), f"{compliance:.1f}%", font=h2_font, fill=colors["text"])
+        draw.rectangle((margin + 555, 640, margin + 585, 670), fill=colors["green"])
+        draw.text((margin + 600, 637), f"No prazo: {no_prazo}", font=label_font, fill=colors["text"])
+        draw.rectangle((margin + 555, 700, margin + 585, 730), fill=colors["red"])
+        draw.text((margin + 600, 697), f"Fora: {fora_prazo}", font=label_font, fill=colors["text"])
+
+        # Distribuicao por tempo.
+        chart_x, chart_y, chart_w, chart_h = 820, 455, 710, 635
+        draw.rounded_rectangle((chart_x, chart_y, chart_x + chart_w, chart_y + chart_h), radius=18, fill=colors["panel"], outline=colors["grid"], width=2)
+        draw.text((chart_x + 28, chart_y + 30), "Distribuicao por Tempo", font=h2_font, fill=colors["text"])
+        bins = [float('-inf'), 0, 1, 6, 24, 168, float('inf')]
+        labels = ['<0h', '<=1h', '1-6h', '6-24h', '1-7d', '>7d']
+        time_bins = pd.cut(
+            self.df_correlacionado['tempo_comunicacao_horas'],
+            bins=bins,
+            labels=labels,
+            right=False,
+        ).value_counts(sort=False)
+        max_count = max(int(time_bins.max()), 1)
+        bar_colors = [colors["blue"], colors["green"], colors["yellow"], colors["orange"], colors["red"], colors["purple"]]
+        base_y = chart_y + chart_h - 95
+        bar_area_h = 380
+        bar_w = 70
+        gap = 35
+        for idx, (label, count) in enumerate(time_bins.items()):
+            x = chart_x + 55 + idx * (bar_w + gap)
+            h = int((int(count) / max_count) * bar_area_h)
+            draw.rectangle((x, base_y - h, x + bar_w, base_y), fill=bar_colors[idx % len(bar_colors)])
+            draw.text((x + 8, base_y - h - 28), str(int(count)), font=small_font, fill=colors["text"])
+            draw.text((x - 4, base_y + 16), str(label), font=small_font, fill=colors["muted"])
+
+        # Rankings simples.
+        rank_y = 1170
+        draw.text((margin, rank_y), "Resumo operacional", font=h2_font, fill=colors["text"])
+        draw.rounded_rectangle((margin, rank_y + 55, page_w - margin, rank_y + 520), radius=18, fill=colors["panel"], outline=colors["grid"], width=2)
+        y_cursor = rank_y + 95
+        draw.text((margin + 30, y_cursor), "Top medicos por comunicados", font=label_font, fill=colors["text"])
+        if self.medico_col:
+            stats_medicos = self.df_correlacionado.groupby(self.medico_col).size().sort_values(ascending=False).head(7)
+            for idx, (name, count) in enumerate(stats_medicos.items(), start=1):
+                y = y_cursor + 38 + idx * 38
+                draw.text((margin + 40, y), f"{idx}. {str(name).split()[-1]} - {int(count)}", font=small_font, fill=colors["muted"])
+        draw.text((margin + 760, y_cursor), "Achados mais frequentes", font=label_font, fill=colors["text"])
+        if self.achado_col:
+            stats_achados = self.df_correlacionado.groupby(self.achado_col).size().sort_values(ascending=False).head(7)
+            for idx, (name, count) in enumerate(stats_achados.items(), start=1):
+                y = y_cursor + 38 + idx * 38
+                label = str(name).split(":")[-1].strip()
+                label = self._wrap_pdf_value(label, width=46)
+                draw.text((margin + 770, y), f"{idx}. {label} - {int(count)}", font=small_font, fill=colors["muted"])
+
+        pages.append(page)
+
+        visible_cols = [col for col in [
+            "SAME", "Paciente", "Data Exame", "Procedimento", "Medico Laudo",
+            "Data Comunicacao", "Tempo h", "Status comunicação"
+        ] if col in detail_df.columns]
+        col_widths = {
+            "SAME": 115,
+            "Paciente": 220,
+            "Data Exame": 165,
+            "Procedimento": 280,
+            "Medico Laudo": 220,
+            "Data Comunicacao": 175,
+            "Tempo h": 95,
+            "Status comunicação": 170,
+        }
+        rows_per_page = 14
+        row_h = 112
+        header_h = 52
+
+        for start in range(0, len(detail_df), rows_per_page):
+            page = Image.new("RGB", (page_w, page_h), colors["bg"])
+            draw = ImageDraw.Draw(page)
+            draw.text((margin, 62), f"Pacientes Comunicados - {self._pdf_period_label()}", font=h2_font, fill=colors["text"])
+            draw.text(
+                (margin, 104),
+                f"Registros {start + 1}-{min(start + rows_per_page, len(detail_df))} de {len(detail_df)}",
+                font=small_font,
+                fill=colors["muted"],
+            )
+
+            x = margin
+            y = 155
+            for col in visible_cols:
+                w = col_widths.get(col, 160)
+                draw.rectangle((x, y, x + w, y + header_h), fill=(31, 111, 235), outline=colors["grid"])
+                draw.text((x + 8, y + 15), col, font=table_header_font, fill=colors["white"])
+                x += w
+
+            page_df = detail_df.iloc[start:start + rows_per_page][visible_cols].copy()
+            for row_offset, (_, row) in enumerate(page_df.iterrows()):
+                row_y = y + header_h + row_offset * row_h
+                x = margin
+                is_late = str(row.get("Status comunicação", "")).strip().lower() == "fora do prazo"
+                for col in visible_cols:
+                    w = col_widths.get(col, 160)
+                    cell_fill = colors["panel"] if row_offset % 2 == 0 else colors["panel_alt"]
+                    if col == "Status comunicação":
+                        cell_fill = colors["red"] if is_late else colors["green"]
+                    draw.rectangle((x, row_y, x + w, row_y + row_h), fill=cell_fill, outline=colors["grid"])
+                    wrap_width = 26
+                    if col in {"SAME", "Tempo h"}:
+                        wrap_width = 12
+                    elif col == "Status comunicação":
+                        wrap_width = 16
+                    elif col in {"Data Exame", "Data Comunicacao"}:
+                        wrap_width = 16
+                    elif col == "Procedimento":
+                        wrap_width = 28
+                    self._draw_wrapped_pdf_text(
+                        draw,
+                        (x + 8, row_y + 12),
+                        row.get(col, ""),
+                        table_font,
+                        colors["text"],
+                        width_chars=wrap_width,
+                        line_height=21,
+                        max_lines=4,
+                    )
+                    x += w
+            pages.append(page)
+
+        pdf_buffer = io.BytesIO()
+        pages[0].save(pdf_buffer, format="PDF", save_all=True, append_images=pages[1:])
+        pdf_buffer.seek(0)
+        return pdf_buffer
+
     def create_pdf_report(self):
         """Gera relatório PDF dark mode com métricas, gráficos e pacientes comunicados."""
         if self.df_correlacionado is None or len(self.df_correlacionado) == 0:
             return None
 
-        from matplotlib.backends.backend_pdf import PdfPages
-        import matplotlib.pyplot as plt
+        try:
+            from matplotlib.backends.backend_pdf import PdfPages
+            import matplotlib.pyplot as plt
+        except ModuleNotFoundError:
+            return self._create_pdf_report_pillow()
 
         bg = "#0e1117"
         panel = "#161b22"
@@ -2100,7 +2371,7 @@ class DashboardAchadosCriticos:
             rows_per_page = 9
             visible_cols = [col for col in [
                 "SAME", "Paciente", "Data Exame", "Procedimento", "Medico Laudo",
-                "Data Comunicacao", "Tempo h", "Fora do prazo"
+                "Data Comunicacao", "Tempo h", "Status comunicação"
             ] if col in detail_df.columns]
 
             for start in range(0, len(detail_df), rows_per_page):
@@ -2139,7 +2410,7 @@ class DashboardAchadosCriticos:
                 table.set_fontsize(7.4)
                 table.scale(1, 2.25)
 
-                prazo_col_idx = page_df.columns.get_loc("Fora do prazo") if "Fora do prazo" in page_df.columns else None
+                prazo_col_idx = page_df.columns.get_loc("Status comunicação") if "Status comunicação" in page_df.columns else None
                 for (row_idx, col_idx), cell in table.get_celld().items():
                     cell.set_edgecolor(grid)
                     if row_idx == 0:
@@ -2151,8 +2422,7 @@ class DashboardAchadosCriticos:
                     base_color = panel if row_idx % 2 else "#111820"
                     if prazo_col_idx is not None and col_idx == prazo_col_idx:
                         value = page_df.iloc[row_idx - 1, col_idx]
-                        if str(value).strip().upper() == "SIM":
-                            base_color = red
+                        base_color = red if str(value).strip().lower() == "fora do prazo" else green
                     cell.set_facecolor(base_color)
                     cell.get_text().set_color(text)
 
@@ -2230,9 +2500,24 @@ class DashboardAchadosCriticos:
             cols_to_show = [col for col in cols_to_show if col in self.df_correlacionado.columns]
 
             if cols_to_show:
-                df_display = self._format_date_columns(self.df_correlacionado[cols_to_show])
+                df_display = self._format_date_columns(
+                    self._add_compliance_status_column(self.df_correlacionado[cols_to_show])
+                )
+                preferred_order = [col for col in cols_to_show if col != 'fora_do_prazo']
+                if 'Status comunicação' in df_display.columns:
+                    insert_after = 'tempo_comunicacao_horas' if 'tempo_comunicacao_horas' in preferred_order else preferred_order[-1]
+                    insert_idx = preferred_order.index(insert_after) + 1
+                    preferred_order.insert(insert_idx, 'Status comunicação')
+                df_display = df_display[[col for col in preferred_order if col in df_display.columns]]
+                styled_display = df_display.sort_values(
+                    'tempo_comunicacao_horas',
+                    ascending=False
+                ).style.applymap(
+                    self._style_compliance_status,
+                    subset=['Status comunicação'] if 'Status comunicação' in df_display.columns else []
+                )
                 st.dataframe(
-                    df_display.sort_values('tempo_comunicacao_horas', ascending=False),
+                    styled_display,
                     use_container_width=True
                 )
 
@@ -2401,73 +2686,67 @@ def main():
                 else:
                     st.sidebar.error("❌ Erro ao carregar dados")
 
-    dashboard_tab, ris_tab = st.tabs(["Dashboard Analitico", "RIS OCR / Email"])
+    # Restaurar atributos do session_state para renderização
+    if st.session_state.processed:
+        full_df = st.session_state.get('df_correlacionado_full')
+        dashboard.df_correlacionado = (
+            full_df.copy() if full_df is not None else st.session_state.df_correlacionado.copy()
+        )
+        review_df = st.session_state.get('df_revisao_correlacao')
+        dashboard.df_revisao_correlacao = review_df.copy() if review_df is not None else None
+        dashboard.medico_col = st.session_state.get('medico_col')
+        dashboard.achado_col = st.session_state.get('achado_col')
+        dashboard.same_col_achados = st.session_state.get('same_col_achados')
+        dashboard.nome_col_achados = st.session_state.get('nome_col_achados')
+        dashboard.nome_col_status = st.session_state.get('nome_col_status')
+        dashboard.data_col_achados = st.session_state.get('data_col_achados')
+        dashboard.data_col_status = st.session_state.get('data_col_status')
+        dashboard.data_sinalizacao_col = st.session_state.get('data_sinalizacao_col')
+        dashboard.status_col = st.session_state.get('status_col')
+        dashboard.desc_col_achados = st.session_state.get('desc_col_achados')
+        dashboard.desc_col_status = st.session_state.get('desc_col_status')
+        dashboard.modalidade_col_achados = st.session_state.get('modalidade_col_achados')
+        dashboard.modalidade_col_status = st.session_state.get('modalidade_col_status')
+        dashboard.contato_col = st.session_state.get('contato_col')
+        dashboard.informado_por_col = st.session_state.get('informado_por_col')
 
-    with dashboard_tab:
-        # Restaurar atributos do session_state para renderização
-        if st.session_state.processed:
-            full_df = st.session_state.get('df_correlacionado_full')
-            dashboard.df_correlacionado = (
-                full_df.copy() if full_df is not None else st.session_state.df_correlacionado.copy()
+        match_summary = st.session_state.get('match_summary')
+        time_summary = st.session_state.get('time_summary')
+        if match_summary:
+            total_revisar = match_summary.get('sem_same', 0) + match_summary.get('sem_confianca', 0)
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("### 🔎 Qualidade da Correlação")
+            st.sidebar.caption(
+                f"Alta: {match_summary.get('alta', 0)} | "
+                f"Média: {match_summary.get('media', 0)} | "
+                f"Revisar: {total_revisar}"
             )
-            review_df = st.session_state.get('df_revisao_correlacao')
-            dashboard.df_revisao_correlacao = review_df.copy() if review_df is not None else None
-            dashboard.medico_col = st.session_state.get('medico_col')
-            dashboard.achado_col = st.session_state.get('achado_col')
-            dashboard.same_col_achados = st.session_state.get('same_col_achados')
-            dashboard.nome_col_achados = st.session_state.get('nome_col_achados')
-            dashboard.nome_col_status = st.session_state.get('nome_col_status')
-            dashboard.data_col_achados = st.session_state.get('data_col_achados')
-            dashboard.data_col_status = st.session_state.get('data_col_status')
-            dashboard.data_sinalizacao_col = st.session_state.get('data_sinalizacao_col')
-            dashboard.status_col = st.session_state.get('status_col')
-            dashboard.desc_col_achados = st.session_state.get('desc_col_achados')
-            dashboard.desc_col_status = st.session_state.get('desc_col_status')
-            dashboard.modalidade_col_achados = st.session_state.get('modalidade_col_achados')
-            dashboard.modalidade_col_status = st.session_state.get('modalidade_col_status')
-            dashboard.contato_col = st.session_state.get('contato_col')
-            dashboard.informado_por_col = st.session_state.get('informado_por_col')
+        if time_summary:
+            st.sidebar.caption(
+                f"Calculados: {time_summary.get('calculados', 0)} | "
+                f"Sem status: {time_summary.get('sem_status', 0)} | "
+                f"Datas inválidas: {time_summary.get('datas_invalidas', 0)}"
+            )
 
-            match_summary = st.session_state.get('match_summary')
-            time_summary = st.session_state.get('time_summary')
-            if match_summary:
-                total_revisar = match_summary.get('sem_same', 0) + match_summary.get('sem_confianca', 0)
-                st.sidebar.markdown("---")
-                st.sidebar.markdown("### 🔎 Qualidade da Correlação")
-                st.sidebar.caption(
-                    f"Alta: {match_summary.get('alta', 0)} | "
-                    f"Média: {match_summary.get('media', 0)} | "
-                    f"Revisar: {total_revisar}"
-                )
-            if time_summary:
-                st.sidebar.caption(
-                    f"Calculados: {time_summary.get('calculados', 0)} | "
-                    f"Sem status: {time_summary.get('sem_status', 0)} | "
-                    f"Datas inválidas: {time_summary.get('datas_invalidas', 0)}"
-                )
+        # Renderizar filtro de data
+        ano_filtro, mes_filtro = dashboard.render_date_filter()
 
-            # Renderizar filtro de data
-            ano_filtro, mes_filtro = dashboard.render_date_filter()
+        # Aplicar filtro de data se selecionado
+        if ano_filtro is not None and dashboard.data_sinalizacao_col:
+            registros_filtrados, registros_totais = dashboard.apply_date_filter(ano_filtro, mes_filtro)
+            st.session_state.df_correlacionado = dashboard.df_correlacionado.copy()
+            st.session_state.current_filter = {
+                "ano": ano_filtro,
+                "mes": mes_filtro,
+                "registros_filtrados": registros_filtrados,
+                "registros_totais": registros_totais,
+            }
+            st.sidebar.success(
+                f"✅ {registros_filtrados} de {registros_totais} registro(s) no período selecionado"
+            )
 
-            # Aplicar filtro de data se selecionado
-            if ano_filtro is not None and dashboard.data_sinalizacao_col:
-                registros_filtrados, registros_totais = dashboard.apply_date_filter(ano_filtro, mes_filtro)
-                st.session_state.df_correlacionado = dashboard.df_correlacionado.copy()
-                st.session_state.current_filter = {
-                    "ano": ano_filtro,
-                    "mes": mes_filtro,
-                    "registros_filtrados": registros_filtrados,
-                    "registros_totais": registros_totais,
-                }
-                st.sidebar.success(
-                    f"✅ {registros_filtrados} de {registros_totais} registro(s) no período selecionado"
-                )
-
-        # Renderizar resultados
-        dashboard.render_analysis_results()
-
-    with ris_tab:
-        dashboard.render_ris_ocr_email_tab()
+    # Renderizar resultados
+    dashboard.render_analysis_results()
 
     # Footer
     st.markdown("---")

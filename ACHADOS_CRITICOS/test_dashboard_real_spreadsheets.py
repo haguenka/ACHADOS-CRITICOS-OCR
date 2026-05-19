@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Smoke test da correlacao do dashboard com as planilhas reais fornecidas."""
 
+import builtins
+import io
 from pathlib import Path
 import sys
 import types
 
+from openpyxl import load_workbook
 import pandas as pd
 
 
@@ -99,6 +102,19 @@ def run_test():
     assert dashboard.df_correlacionado["match_procedure_similarity"].min() >= 0.99
     assert int(dashboard.df_correlacionado["tempo_negativo"].sum()) == 6
 
+    excel_report = dashboard.create_export_report()
+    assert excel_report is not None
+    workbook = load_workbook(io.BytesIO(excel_report.getvalue()))
+    worksheet = workbook["Dados_Correlacionados"]
+    headers = [cell.value for cell in worksheet[1]]
+    status_col = headers.index("Status comunicação") + 1
+    fills = {
+        worksheet.cell(row=row_idx, column=status_col).fill.fgColor.rgb
+        for row_idx in range(2, worksheet.max_row + 1)
+    }
+    assert any(fill and fill.endswith("27AE60") for fill in fills), fills
+    assert any(fill and fill.endswith("E74C3C") for fill in fills), fills
+
     full_df = dashboard.df_correlacionado.copy()
     full_review_df = dashboard.df_revisao_correlacao.copy()
     dashboard.apply_date_filter(2026, 1)
@@ -115,6 +131,25 @@ def run_test():
     pdf_report = dashboard.create_pdf_report()
     assert pdf_report is not None
     assert pdf_report.getvalue().startswith(b"%PDF")
+
+    for module_name in list(sys.modules):
+        if module_name.startswith("matplotlib"):
+            del sys.modules[module_name]
+
+    original_import = builtins.__import__
+
+    def import_without_matplotlib(name, *args, **kwargs):
+        if name.startswith("matplotlib"):
+            raise ModuleNotFoundError("No module named 'matplotlib'")
+        return original_import(name, *args, **kwargs)
+
+    builtins.__import__ = import_without_matplotlib
+    try:
+        fallback_pdf = dashboard.create_pdf_report()
+    finally:
+        builtins.__import__ = original_import
+    assert fallback_pdf is not None
+    assert fallback_pdf.getvalue().startswith(b"%PDF")
 
     print("OK - correlacao real validada com 57 registros calculados.")
 
