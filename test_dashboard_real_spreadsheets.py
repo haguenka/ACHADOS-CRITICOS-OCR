@@ -21,6 +21,7 @@ class _SidebarStub:
 
 def _install_streamlit_stub():
     fake_st = types.SimpleNamespace(
+        session_state={},
         set_page_config=lambda *args, **kwargs: None,
         markdown=lambda *args, **kwargs: None,
         error=lambda *args, **kwargs: None,
@@ -97,6 +98,23 @@ def run_test():
     assert len(dashboard.df_revisao_correlacao) == 6
     assert dashboard.df_correlacionado["match_procedure_similarity"].min() >= 0.99
     assert int(dashboard.df_correlacionado["tempo_negativo"].sum()) == 6
+
+    full_df = dashboard.df_correlacionado.copy()
+    full_review_df = dashboard.df_revisao_correlacao.copy()
+    dashboard.apply_date_filter(2026, 1)
+    assert len(dashboard.df_correlacionado) == 16
+
+    dashboard.df_correlacionado = full_df.copy()
+    dashboard.df_revisao_correlacao = full_review_df.copy()
+    sys.modules["streamlit"].session_state["current_filter"] = {
+        "ano": 2026,
+        "mes": None,
+        "registros_filtrados": len(full_df),
+        "registros_totais": len(full_df),
+    }
+    pdf_report = dashboard.create_pdf_report()
+    assert pdf_report is not None
+    assert pdf_report.getvalue().startswith(b"%PDF")
 
     print("OK - correlacao real validada com 57 registros calculados.")
 
