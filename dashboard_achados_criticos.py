@@ -17,6 +17,8 @@ import os
 import re
 import shutil
 import smtplib
+import unicodedata
+from difflib import SequenceMatcher
 from email.message import EmailMessage
 from pathlib import Path
 from PIL import ImageFilter
@@ -113,15 +115,29 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Configuracao fixa do servidor SMTP. O admin deve preencher esses valores.
+def _env_bool(name, default=True):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "nao", "não", "no", "off"}
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# Configuracao do servidor SMTP por variaveis de ambiente.
 ADMIN_SMTP_CONFIG = {
-    "host": "smtp.seu-servidor.local",
-    "port": 587,
-    "use_tls": True,
-    "username": "no-reply@hospital.local",
-    "password": "ALTERAR_PELO_ADMIN",
-    "sender_email": "no-reply@hospital.local",
-    "sender_name": "CDI - Achados Criticos",
+    "host": os.environ.get("SMTP_HOST", ""),
+    "port": _env_int("SMTP_PORT", 587),
+    "use_tls": _env_bool("SMTP_USE_TLS", True),
+    "username": os.environ.get("SMTP_USERNAME", ""),
+    "password": os.environ.get("SMTP_PASSWORD", ""),
+    "sender_email": os.environ.get("SMTP_SENDER_EMAIL", os.environ.get("SMTP_USERNAME", "")),
+    "sender_name": os.environ.get("SMTP_SENDER_NAME", "CDI - Achados Criticos"),
     "tesseract_cmd": os.environ.get("TESSERACT_CMD", "/usr/bin/tesseract"),
 }
 
@@ -196,8 +212,55 @@ class DashboardAchadosCriticos:
         """Converte valor único para datetime priorizando padrão brasileiro."""
         return self._parse_datetime_series(pd.Series([value])).iloc[0]
 
+    def _normalize_text(self, value):
+        """Normaliza texto para comparacao robusta entre planilhas."""
+        if pd.isna(value):
+            return ""
+        text = str(value).strip().lower()
+        text = "".join(
+            char for char in unicodedata.normalize("NFKD", text)
+            if not unicodedata.combining(char)
+        )
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _normalize_identifier(self, value):
+        """Normaliza identificadores como SAME preservando comparacao numerica."""
+        if pd.isna(value):
+            return ""
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)) and np.isfinite(value):
+            if float(value).is_integer():
+                return str(int(value))
+
+        text = str(value).strip()
+        text = re.sub(r"\.0$", "", text)
+        digits = re.sub(r"\D+", "", text)
+        if digits:
+            return digits.lstrip("0") or "0"
+        return self._normalize_text(text)
+
+    def _text_similarity(self, left, right):
+        """Calcula similaridade textual normalizada."""
+        left_norm = self._normalize_text(left)
+        right_norm = self._normalize_text(right)
+        if not left_norm or not right_norm:
+            return 0.0
+        if left_norm == right_norm:
+            return 1.0
+        return SequenceMatcher(None, left_norm, right_norm).ratio()
+
+    def _token_overlap(self, left, right):
+        """Mede sobreposicao de tokens, util para nomes de pacientes."""
+        left_tokens = set(self._normalize_text(left).split())
+        right_tokens = set(self._normalize_text(right).split())
+        if not left_tokens or not right_tokens:
+            return 0.0
+        return len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1)
+
     def _format_date_columns(self, df):
-        """Formata colunas de data para DD/MM/AAAA apenas para exibição/export."""
+        """Formata colunas de data/hora apenas para exibição/export."""
         df_fmt = df.copy()
         candidate_cols = {
             self.data_col_achados if hasattr(self, 'data_col_achados') else None,
@@ -215,7 +278,13 @@ class DashboardAchadosCriticos:
         for col in candidate_cols:
             if col and col in df_fmt.columns:
                 parsed = self._parse_datetime_series(df_fmt[col])
-                formatted = parsed.dt.strftime('%d/%m/%Y')
+                has_time = (
+                    parsed.dt.hour.fillna(0).ne(0) |
+                    parsed.dt.minute.fillna(0).ne(0) |
+                    parsed.dt.second.fillna(0).ne(0)
+                ).any()
+                date_format = '%d/%m/%Y %H:%M' if has_time else '%d/%m/%Y'
+                formatted = parsed.dt.strftime(date_format)
                 df_fmt[col] = formatted.where(parsed.notna(), '')
 
         return df_fmt
@@ -658,14 +727,17 @@ class DashboardAchadosCriticos:
             return None, f"Erro ao ler screenshot: {exc}", None
 
     def _smtp_config_ready(self):
-        """Valida a configuracao fixa de SMTP."""
+        """Valida a configuracao de SMTP."""
         required_keys = ["host", "port", "sender_email"]
         missing = [key for key in required_keys if not ADMIN_SMTP_CONFIG.get(key)]
         if missing:
-            return False, f"Configuracao SMTP incompleta: {', '.join(missing)}"
+            return False, (
+                "Configuracao SMTP incompleta. Defina as variaveis: "
+                "SMTP_HOST, SMTP_PORT e SMTP_SENDER_EMAIL."
+            )
 
-        if ADMIN_SMTP_CONFIG.get("password") == "ALTERAR_PELO_ADMIN":
-            return False, "Senha SMTP ainda nao foi configurada pelo admin."
+        if ADMIN_SMTP_CONFIG.get("username") and not ADMIN_SMTP_CONFIG.get("password"):
+            return False, "SMTP_USERNAME foi definido, mas SMTP_PASSWORD esta vazio."
 
         return True, ""
 
@@ -962,22 +1034,16 @@ class DashboardAchadosCriticos:
 
     def identify_columns(self):
         """Identifica automaticamente as colunas necessárias"""
-        # Função auxiliar para normalizar strings
-        def normalize(text):
-            if not isinstance(text, str):
-                return text
-            return text.lower().replace('ç', 'c').replace('ã', 'a').replace('á', 'a').replace('í', 'i').replace('ó', 'o')
-
         # Encontrar coluna SAME
         self.same_col_achados = None
         self.same_col_status = None
         for col in self.df_achados.columns:
-            if isinstance(col, str) and 'same' in normalize(col):
+            if isinstance(col, str) and 'same' in self._normalize_text(col):
                 self.same_col_achados = col
                 break
 
         for col in self.df_status.columns:
-            if isinstance(col, str) and 'same' in normalize(col):
+            if isinstance(col, str) and 'same' in self._normalize_text(col):
                 self.same_col_status = col
                 break
 
@@ -985,13 +1051,13 @@ class DashboardAchadosCriticos:
         self.nome_col_achados = None
         self.nome_col_status = None
         for col in self.df_achados.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'nome' in col_norm and 'paciente' in col_norm:
                 self.nome_col_achados = col
                 break
 
         for col in self.df_status.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'nome' in col_norm and 'paciente' in col_norm:
                 self.nome_col_status = col
                 break
@@ -1000,13 +1066,13 @@ class DashboardAchadosCriticos:
         self.data_col_achados = None
         self.data_col_status = None
         for col in self.df_achados.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'data' in col_norm and 'exame' in col_norm:
                 self.data_col_achados = col
                 break
 
         for col in self.df_status.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'data' in col_norm and ('prescri' in col_norm or 'hora' in col_norm):
                 self.data_col_status = col
                 break
@@ -1015,28 +1081,44 @@ class DashboardAchadosCriticos:
         self.desc_col_achados = None
         self.desc_col_status = None
         for col in self.df_achados.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'descri' in col_norm and 'proced' in col_norm:
                 self.desc_col_achados = col
                 break
 
         for col in self.df_status.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'descri' in col_norm and 'proced' in col_norm:
                 self.desc_col_status = col
+                break
+
+        # Encontrar coluna Modalidade
+        self.modalidade_col_achados = None
+        self.modalidade_col_status = None
+        for col in self.df_achados.columns:
+            col_norm = self._normalize_text(col)
+            if isinstance(col, str) and 'modalidade' in col_norm:
+                self.modalidade_col_achados = col
+                break
+
+        for col in self.df_status.columns:
+            col_norm = self._normalize_text(col)
+            if isinstance(col, str) and 'modalidade' in col_norm:
+                self.modalidade_col_status = col
                 break
 
         # Encontrar STATUS_ALAUDAR
         self.status_col = None
         for col in self.df_status.columns:
-            if isinstance(col, str) and 'status' in normalize(col) and 'laudar' in normalize(col):
+            col_norm = self._normalize_text(col)
+            if isinstance(col, str) and 'status' in col_norm and 'laudar' in col_norm:
                 self.status_col = col
                 break
 
         # Encontrar Data Sinalização
         self.data_sinalizacao_col = None
         for col in self.df_achados.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'data' in col_norm and 'sinalizacao' in col_norm:
                 self.data_sinalizacao_col = col
                 break
@@ -1044,7 +1126,7 @@ class DashboardAchadosCriticos:
         # Encontrar coluna Medico Laudo
         self.medico_col = None
         for col in self.df_achados.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'medico' in col_norm and 'laudo' in col_norm:
                 self.medico_col = col
                 break
@@ -1052,7 +1134,7 @@ class DashboardAchadosCriticos:
         # Encontrar coluna Achado Crítico
         self.achado_col = None
         for col in self.df_achados.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'achado' in col_norm and 'critico' in col_norm:
                 self.achado_col = col
                 break
@@ -1060,7 +1142,7 @@ class DashboardAchadosCriticos:
         # Encontrar coluna Contato (médico que recebeu o contato)
         self.contato_col = None
         for col in self.df_achados.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'contato' in col_norm and 'sucesso' not in col_norm:
                 self.contato_col = col
                 break
@@ -1068,13 +1150,108 @@ class DashboardAchadosCriticos:
         # Encontrar coluna Informado Por (médico que fez a comunicação)
         self.informado_por_col = None
         for col in self.df_achados.columns:
-            col_norm = normalize(col)
+            col_norm = self._normalize_text(col)
             if isinstance(col, str) and 'informado' in col_norm and 'por' in col_norm:
                 self.informado_por_col = col
                 break
 
         return (self.same_col_achados is not None and
                 self.same_col_status is not None)
+
+    def _score_status_candidate(self, achado, exame):
+        """Pontua um exame candidato para pareamento com um achado critico."""
+        score = 100.0
+
+        achado_nome = achado.get(self.nome_col_achados, "") if self.nome_col_achados else ""
+        exame_nome = exame.get(self.nome_col_status, "") if self.nome_col_status else ""
+        name_similarity = max(
+            self._text_similarity(achado_nome, exame_nome),
+            self._token_overlap(achado_nome, exame_nome),
+        )
+        score += name_similarity * 30
+
+        achado_proc = achado.get(self.desc_col_achados, "") if self.desc_col_achados else ""
+        exame_proc = exame.get(self.desc_col_status, "") if self.desc_col_status else ""
+        procedure_similarity = self._text_similarity(achado_proc, exame_proc)
+        if self.desc_col_achados and self.desc_col_status:
+            score += procedure_similarity * 90
+            if procedure_similarity >= 0.95:
+                score += 20
+            elif procedure_similarity < 0.45:
+                score -= 25
+
+        achado_dt = self._parse_datetime_value(
+            achado.get(self.data_col_achados)
+        ) if self.data_col_achados else pd.NaT
+        exame_dt = self._parse_datetime_value(
+            exame.get(self.data_col_status)
+        ) if self.data_col_status else pd.NaT
+
+        same_day = False
+        time_delta_min = np.nan
+        if pd.notna(achado_dt) and pd.notna(exame_dt):
+            same_day = achado_dt.date() == exame_dt.date()
+            time_delta_min = abs((exame_dt - achado_dt).total_seconds()) / 60
+            if same_day:
+                score += 60
+            if time_delta_min <= 1:
+                score += 30
+            elif time_delta_min <= 60:
+                score += 22
+            elif time_delta_min <= 360:
+                score += 14
+            elif time_delta_min <= 1440:
+                score += 6
+            else:
+                score -= min(35, time_delta_min / 1440)
+
+        modalidade_similarity = 0.0
+        if self.modalidade_col_achados and self.modalidade_col_status:
+            modalidade_similarity = self._text_similarity(
+                achado.get(self.modalidade_col_achados, ""),
+                exame.get(self.modalidade_col_status, ""),
+            )
+            score += modalidade_similarity * 10
+
+        if self.status_col and pd.notna(exame.get(self.status_col)):
+            score += 5
+
+        return {
+            "score": round(float(score), 4),
+            "name_similarity": round(float(name_similarity), 4),
+            "procedure_similarity": round(float(procedure_similarity), 4),
+            "modality_similarity": round(float(modalidade_similarity), 4),
+            "same_day": bool(same_day),
+            "time_delta_min": round(float(time_delta_min), 2) if pd.notna(time_delta_min) else np.nan,
+        }
+
+    def _match_is_reliable(self, details):
+        """Decide se o melhor candidato pode ser usado no calculo operacional."""
+        has_procedure_cols = bool(self.desc_col_achados and self.desc_col_status)
+        if has_procedure_cols and details["procedure_similarity"] < 0.72:
+            return False
+
+        has_name_cols = bool(self.nome_col_achados and self.nome_col_status)
+        if has_name_cols and details["name_similarity"] < 0.35:
+            return False
+
+        time_delta = details["time_delta_min"]
+        if pd.notna(time_delta) and time_delta > 1440 and not details["same_day"]:
+            return False
+
+        return details["score"] >= 160
+
+    def _match_confidence(self, details):
+        """Classifica a confianca do pareamento."""
+        if not self._match_is_reliable(details):
+            return "Baixa"
+        if (
+            details["score"] >= 245 and
+            details["procedure_similarity"] >= 0.90 and
+            details["same_day"]
+        ):
+            return "Alta"
+        return "Media"
 
     def correlate_data(self):
         """Correlaciona as planilhas usando múltiplos critérios"""
@@ -1087,82 +1264,98 @@ class DashboardAchadosCriticos:
                 st.error("❌ Não foi possível identificar as colunas necessárias")
                 return False
 
+            status_work = self.df_status.copy()
+            status_work["_match_same_norm"] = status_work[self.same_col_status].map(self._normalize_identifier)
+
             correlacoes = []
+            match_counts = {
+                "alta": 0,
+                "media": 0,
+                "baixa": 0,
+                "sem_same": 0,
+                "sem_confianca": 0,
+            }
 
-            for idx, achado in self.df_achados.iterrows():
-                same_achado = achado[self.same_col_achados]
-                nome_achado = achado.get(self.nome_col_achados, '') if self.nome_col_achados else ''
-                data_exame_achado = achado.get(self.data_col_achados, None) if self.data_col_achados else None
-                descricao_achado = achado.get(self.desc_col_achados, '') if self.desc_col_achados else ''
+            for _, achado in self.df_achados.iterrows():
+                same_achado_norm = self._normalize_identifier(achado[self.same_col_achados])
 
-                # Buscar exames correspondentes
-                exames_same = self.df_status[self.df_status[self.same_col_status] == same_achado]
+                # Buscar exames correspondentes com SAME normalizado.
+                exames_same = status_work[status_work["_match_same_norm"] == same_achado_norm]
+
+                correlacao = achado.copy()
+                correlacao["match_status"] = ""
+                correlacao["match_confidence"] = ""
+                correlacao["match_score"] = np.nan
+                correlacao["match_name_similarity"] = np.nan
+                correlacao["match_procedure_similarity"] = np.nan
+                correlacao["match_modality_similarity"] = np.nan
+                correlacao["match_same_day"] = False
+                correlacao["match_time_delta_min"] = np.nan
+                correlacao["match_candidates"] = len(exames_same)
+                correlacao["match_status_row"] = np.nan
+                correlacao["match_candidate_procedure"] = ""
+                correlacao["match_candidate_datetime"] = ""
 
                 if len(exames_same) == 0:
-                    correlacao = achado.copy()
+                    correlacao["match_status"] = "sem_same"
+                    match_counts["sem_same"] += 1
                     correlacoes.append(correlacao)
                     continue
 
-                # Filtrar por nome
-                if pd.notna(nome_achado) and isinstance(nome_achado, str) and self.nome_col_status:
-                    exames_nome = exames_same[
-                        exames_same[self.nome_col_status].str.contains(
-                            nome_achado.split()[0], case=False, na=False
-                        ) |
-                        exames_same[self.nome_col_status].str.contains(
-                            nome_achado.split()[-1], case=False, na=False
-                        )
-                    ]
-                else:
-                    exames_nome = exames_same
+                scored_candidates = []
+                for status_idx, exame in exames_same.iterrows():
+                    details = self._score_status_candidate(achado, exame)
+                    scored_candidates.append((details["score"], status_idx, exame, details))
 
-                # Filtrar por data
-                if pd.notna(data_exame_achado) and self.data_col_status:
-                    try:
-                        data_achado_dt = self._parse_datetime_value(data_exame_achado)
-                        if pd.isna(data_achado_dt):
-                            exames_finais = exames_nome
-                        else:
-                            data_achado_str = data_achado_dt.strftime('%d/%m/%Y')
+                scored_candidates.sort(key=lambda item: item[0], reverse=True)
+                _, status_idx, melhor_exame, details = scored_candidates[0]
 
-                            exames_data = []
-                            for _, exame in exames_nome.iterrows():
-                                if pd.notna(exame.get(self.data_col_status)):
-                                    try:
-                                        data_exame_dt = self._parse_datetime_value(exame[self.data_col_status])
-                                        if pd.isna(data_exame_dt):
-                                            continue
-                                        data_exame_str = data_exame_dt.strftime('%d/%m/%Y')
-                                        if data_achado_str == data_exame_str:
-                                            exames_data.append(exame)
-                                    except:
-                                        continue
+                reliable = self._match_is_reliable(details)
+                confidence = self._match_confidence(details)
+                correlacao["match_confidence"] = confidence
+                correlacao["match_score"] = details["score"]
+                correlacao["match_name_similarity"] = details["name_similarity"]
+                correlacao["match_procedure_similarity"] = details["procedure_similarity"]
+                correlacao["match_modality_similarity"] = details["modality_similarity"]
+                correlacao["match_same_day"] = details["same_day"]
+                correlacao["match_time_delta_min"] = details["time_delta_min"]
+                correlacao["match_status_row"] = status_idx
+                correlacao["match_candidate_procedure"] = (
+                    melhor_exame.get(self.desc_col_status, "") if self.desc_col_status else ""
+                )
+                correlacao["match_candidate_datetime"] = (
+                    melhor_exame.get(self.data_col_status, "") if self.data_col_status else ""
+                )
 
-                            if len(exames_data) > 0:
-                                exames_finais = pd.DataFrame(exames_data)
-                            else:
-                                exames_finais = exames_nome
-                    except:
-                        exames_finais = exames_nome
-                else:
-                    exames_finais = exames_nome
-
-                # Selecionar melhor exame
-                if len(exames_finais) > 0:
-                    if self.status_col:
-                        exames_com_status = exames_finais[exames_finais[self.status_col].notna()]
-                        melhor_exame = exames_com_status.iloc[0] if len(exames_com_status) > 0 else exames_finais.iloc[0]
-                    else:
-                        melhor_exame = exames_finais.iloc[0]
-
-                    correlacao = achado.copy()
-                    for col in melhor_exame.index:
-                        if col != self.same_col_status:
-                            correlacao[col] = melhor_exame[col]
-
+                if not reliable:
+                    correlacao["match_status"] = "sem_correlacao_confiavel"
+                    match_counts["baixa"] += 1
+                    match_counts["sem_confianca"] += 1
                     correlacoes.append(correlacao)
+                    continue
+
+                correlacao["match_status"] = "correlacionado"
+                if confidence == "Alta":
+                    match_counts["alta"] += 1
+                else:
+                    match_counts["media"] += 1
+
+                for col in melhor_exame.index:
+                    if col in {"_match_same_norm"}:
+                        continue
+                    if col != self.same_col_status:
+                        correlacao[col] = melhor_exame[col]
+
+                correlacoes.append(correlacao)
 
             self.df_correlacionado = pd.DataFrame(correlacoes)
+            self.match_summary = match_counts
+
+            total_ok = match_counts["alta"] + match_counts["media"]
+            st.sidebar.info(
+                f"🔗 Correlação confiável: {total_ok}/{len(self.df_achados)} "
+                f"registro(s). Revisar: {match_counts['sem_same'] + match_counts['sem_confianca']}."
+            )
             return True
 
         except Exception as e:
@@ -1184,6 +1377,22 @@ class DashboardAchadosCriticos:
             df_com_status = self.df_correlacionado[
                 self.df_correlacionado[self.status_col].notna()
             ].copy()
+
+            registros_sem_status = len(self.df_correlacionado) - len(df_com_status)
+            self.df_revisao_correlacao = self.df_correlacionado[
+                self.df_correlacionado[self.status_col].isna()
+            ].copy()
+            self.time_summary = {
+                "total_correlacionado": len(self.df_correlacionado),
+                "sem_status": registros_sem_status,
+                "datas_invalidas": 0,
+                "calculados": 0,
+            }
+            if registros_sem_status > 0:
+                st.sidebar.warning(
+                    f"⚠️ {registros_sem_status} registro(s) sem correlação/status confiável "
+                    "não entraram no cálculo de tempo"
+                )
 
             if len(df_com_status) == 0:
                 st.warning("⚠️ Nenhum registro com STATUS_ALAUDAR encontrado")
@@ -1212,7 +1421,24 @@ class DashboardAchadosCriticos:
                 df_com_status['status_laudar_dt'].notna()
             )
 
+            datas_invalidas = len(df_com_status) - int(registros_validos.sum())
+            self.time_summary["datas_invalidas"] = datas_invalidas
+            if datas_invalidas > 0:
+                self.df_revisao_correlacao = pd.concat(
+                    [
+                        self.df_revisao_correlacao,
+                        df_com_status[~registros_validos].copy(),
+                    ],
+                    ignore_index=True,
+                    sort=False,
+                )
+            if datas_invalidas > 0:
+                st.sidebar.warning(
+                    f"⚠️ {datas_invalidas} registro(s) com datas inválidas removido(s)"
+                )
+
             self.df_correlacionado = df_com_status[registros_validos].copy()
+            self.time_summary["calculados"] = len(self.df_correlacionado)
 
             # Criar coluna adicional para indicar casos com tempo negativo
             self.df_correlacionado['tempo_negativo'] = self.df_correlacionado['tempo_comunicacao_horas'] < 0
@@ -1242,7 +1468,7 @@ class DashboardAchadosCriticos:
         # Filtrar apenas registros com médico preenchido
         self.df_correlacionado = self.df_correlacionado[
             self.df_correlacionado[self.medico_col].notna() &
-            (self.df_correlacionado[self.medico_col].str.strip() != '')
+            (self.df_correlacionado[self.medico_col].astype(str).str.strip() != '')
         ].copy()
 
         total_depois = len(self.df_correlacionado)
@@ -1355,6 +1581,8 @@ class DashboardAchadosCriticos:
 
         no_prazo = (~self.df_correlacionado['fora_do_prazo']).sum()
         fora_prazo = self.df_correlacionado['fora_do_prazo'].sum()
+        total = no_prazo + fora_prazo
+        compliance_pct = (no_prazo / total * 100) if total else 0
 
         fig = go.Figure(data=[
             go.Pie(
@@ -1391,7 +1619,7 @@ class DashboardAchadosCriticos:
             margin=dict(t=80, b=80, l=40, r=40),
             annotations=[
                 dict(
-                    text=f'<b>{(no_prazo/(no_prazo+fora_prazo)*100):.1f}%</b><br>Compliance',
+                    text=f'<b>{compliance_pct:.1f}%</b><br>Compliance',
                     x=0.5, y=0.5,
                     font_size=24,
                     font_color='white',
@@ -1429,7 +1657,7 @@ class DashboardAchadosCriticos:
                  for pct in top_medicos['percentual_fora_prazo']]
 
         fig.add_trace(go.Bar(
-            y=[nome.split()[-1] for nome in top_medicos.index],  # Só sobrenome
+            y=[str(nome).split()[-1] if str(nome).split() else str(nome) for nome in top_medicos.index],
             x=top_medicos['total_comunicados'],
             orientation='h',
             marker=dict(color=colors, opacity=0.8),
@@ -1486,13 +1714,14 @@ class DashboardAchadosCriticos:
         # Simplificar nomes
         nomes_simplificados = []
         for nome in top_achados.index:
-            if ':' in nome:
-                partes = nome.split(':')
+            nome_texto = str(nome)
+            if ':' in nome_texto:
+                partes = nome_texto.split(':')
                 especialidade = partes[0].replace('Especialista em ', '').replace('Especialidade ', '')
                 achado = partes[1].strip()[:40]
                 nome_simp = f"{especialidade}: {achado}"
             else:
-                nome_simp = nome[:50]
+                nome_simp = nome_texto[:50]
             nomes_simplificados.append(nome_simp)
 
         fig = go.Figure()
@@ -1549,17 +1778,17 @@ class DashboardAchadosCriticos:
             return None
 
         # Criar bins para diferentes faixas de tempo
-        bins = [0, 1, 6, 24, 168, float('inf')]
-        labels = ['≤ 1h', '1-6h', '6-24h', '1-7 dias', '> 7 dias']
+        bins = [float('-inf'), 0, 1, 6, 24, 168, float('inf')]
+        labels = ['< 0h', '≤ 1h', '1-6h', '6-24h', '1-7 dias', '> 7 dias']
 
         self.df_correlacionado['faixa_tempo'] = pd.cut(
             self.df_correlacionado['tempo_comunicacao_horas'],
             bins=bins, labels=labels, right=False
         )
 
-        faixa_counts = self.df_correlacionado['faixa_tempo'].value_counts()
+        faixa_counts = self.df_correlacionado['faixa_tempo'].value_counts(sort=False)
 
-        colors = ['#27AE60', '#F1C40F', '#E67E22', '#E74C3C', '#8E44AD']
+        colors = ['#3498DB', '#27AE60', '#F1C40F', '#E67E22', '#E74C3C', '#8E44AD']
 
         fig = go.Figure(data=[
             go.Bar(
@@ -1692,7 +1921,15 @@ class DashboardAchadosCriticos:
                 cols_to_show.append(self.data_sinalizacao_col)
             if self.status_col:
                 cols_to_show.append(self.status_col)
-            cols_to_show.extend(['tempo_comunicacao_horas', 'fora_do_prazo'])
+            cols_to_show.extend([
+                'tempo_comunicacao_horas',
+                'fora_do_prazo',
+                'tempo_negativo',
+                'match_confidence',
+                'match_score',
+                'match_procedure_similarity',
+                'match_time_delta_min',
+            ])
 
             # Filtrar apenas colunas que existem no DataFrame
             cols_to_show = [col for col in cols_to_show if col in self.df_correlacionado.columns]
@@ -1702,6 +1939,40 @@ class DashboardAchadosCriticos:
                 st.dataframe(
                     df_display.sort_values('tempo_comunicacao_horas', ascending=False),
                     use_container_width=True
+                )
+
+        review_df = getattr(self, 'df_revisao_correlacao', None)
+        if review_df is not None and not review_df.empty:
+            with st.expander("⚠️ Registros para Revisão de Correlação", expanded=False):
+                review_cols = [
+                    self.same_col_achados,
+                    self.nome_col_achados,
+                    self.data_col_achados,
+                    self.desc_col_achados,
+                    'match_status',
+                    'match_candidates',
+                    'match_score',
+                    'match_procedure_similarity',
+                    'match_candidate_procedure',
+                    'match_candidate_datetime',
+                ]
+                review_cols = [col for col in review_cols if col and col in review_df.columns]
+                review_display = self._format_date_columns(review_df[review_cols])
+                st.dataframe(review_display, use_container_width=True)
+
+                review_output = io.BytesIO()
+                with pd.ExcelWriter(review_output, engine='openpyxl') as writer:
+                    self._format_date_columns(review_df).to_excel(
+                        writer,
+                        sheet_name='Revisao_Correlacao',
+                        index=False,
+                    )
+                review_output.seek(0)
+                st.download_button(
+                    label="⬇️ Baixar Revisão de Correlação",
+                    data=review_output,
+                    file_name=f"revisao_correlacao_achados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
         # Export
@@ -1770,14 +2041,28 @@ def main():
                             # Salvar no session_state
                             st.session_state.df_correlacionado = dashboard.df_correlacionado
                             st.session_state.processed = True
+                            st.session_state.match_summary = getattr(dashboard, 'match_summary', {})
+                            st.session_state.time_summary = getattr(dashboard, 'time_summary', {})
+                            st.session_state.df_revisao_correlacao = getattr(
+                                dashboard,
+                                'df_revisao_correlacao',
+                                pd.DataFrame(),
+                            )
 
                             # Copiar atributos necessários
                             st.session_state.medico_col = dashboard.medico_col
                             st.session_state.achado_col = dashboard.achado_col
                             st.session_state.same_col_achados = dashboard.same_col_achados
                             st.session_state.nome_col_achados = dashboard.nome_col_achados
+                            st.session_state.nome_col_status = dashboard.nome_col_status
+                            st.session_state.data_col_achados = dashboard.data_col_achados
+                            st.session_state.data_col_status = dashboard.data_col_status
                             st.session_state.data_sinalizacao_col = dashboard.data_sinalizacao_col
                             st.session_state.status_col = dashboard.status_col
+                            st.session_state.desc_col_achados = dashboard.desc_col_achados
+                            st.session_state.desc_col_status = dashboard.desc_col_status
+                            st.session_state.modalidade_col_achados = dashboard.modalidade_col_achados
+                            st.session_state.modalidade_col_status = dashboard.modalidade_col_status
                             st.session_state.contato_col = dashboard.contato_col
                             st.session_state.informado_por_col = dashboard.informado_por_col
 
@@ -1795,14 +2080,40 @@ def main():
         # Restaurar atributos do session_state para renderização
         if st.session_state.processed:
             dashboard.df_correlacionado = st.session_state.df_correlacionado
+            dashboard.df_revisao_correlacao = st.session_state.get('df_revisao_correlacao')
             dashboard.medico_col = st.session_state.get('medico_col')
             dashboard.achado_col = st.session_state.get('achado_col')
             dashboard.same_col_achados = st.session_state.get('same_col_achados')
             dashboard.nome_col_achados = st.session_state.get('nome_col_achados')
+            dashboard.nome_col_status = st.session_state.get('nome_col_status')
+            dashboard.data_col_achados = st.session_state.get('data_col_achados')
+            dashboard.data_col_status = st.session_state.get('data_col_status')
             dashboard.data_sinalizacao_col = st.session_state.get('data_sinalizacao_col')
             dashboard.status_col = st.session_state.get('status_col')
+            dashboard.desc_col_achados = st.session_state.get('desc_col_achados')
+            dashboard.desc_col_status = st.session_state.get('desc_col_status')
+            dashboard.modalidade_col_achados = st.session_state.get('modalidade_col_achados')
+            dashboard.modalidade_col_status = st.session_state.get('modalidade_col_status')
             dashboard.contato_col = st.session_state.get('contato_col')
             dashboard.informado_por_col = st.session_state.get('informado_por_col')
+
+            match_summary = st.session_state.get('match_summary')
+            time_summary = st.session_state.get('time_summary')
+            if match_summary:
+                total_revisar = match_summary.get('sem_same', 0) + match_summary.get('sem_confianca', 0)
+                st.sidebar.markdown("---")
+                st.sidebar.markdown("### 🔎 Qualidade da Correlação")
+                st.sidebar.caption(
+                    f"Alta: {match_summary.get('alta', 0)} | "
+                    f"Média: {match_summary.get('media', 0)} | "
+                    f"Revisar: {total_revisar}"
+                )
+            if time_summary:
+                st.sidebar.caption(
+                    f"Calculados: {time_summary.get('calculados', 0)} | "
+                    f"Sem status: {time_summary.get('sem_status', 0)} | "
+                    f"Datas inválidas: {time_summary.get('datas_invalidas', 0)}"
+                )
 
             # Renderizar filtro de data
             ano_filtro, mes_filtro = dashboard.render_date_filter()
