@@ -2272,29 +2272,45 @@ class DashboardAchadosCriticos:
 
         # Export
         st.markdown("## 📥 Export de Relatórios")
-        col1, col2, col3 = st.columns([1, 1, 2])
+        st.caption("Os arquivos abaixo usam exatamente o período selecionado no filtro de ano/mês.")
+        col1, col2 = st.columns(2)
 
         with col1:
-            if st.button("📊 Gerar Relatório Excel", type="primary"):
+            with st.spinner("Preparando Excel..."):
                 excel_data = self.create_export_report()
-                if excel_data:
-                    st.download_button(
-                        label="⬇️ Download Excel",
-                        data=excel_data,
-                        file_name=f"relatorio_achados_criticos_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+            if excel_data:
+                st.download_button(
+                    label="📊 Exportar Excel",
+                    data=excel_data,
+                    file_name=f"relatorio_achados_criticos_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="secondary",
+                    use_container_width=True,
+                    key="download_excel_report",
+                )
 
         with col2:
-            if st.button("📄 Gerar PDF Dark Mode", type="primary"):
-                pdf_data = self.create_pdf_report()
-                if pdf_data:
-                    st.download_button(
-                        label="⬇️ Download PDF",
-                        data=pdf_data,
-                        file_name=f"relatorio_achados_criticos_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                        mime="application/pdf"
-                    )
+            try:
+                with st.spinner("Preparando PDF dark mode..."):
+                    pdf_data = self.create_pdf_report()
+            except Exception as exc:
+                pdf_data = None
+                st.error(f"Erro ao gerar PDF: {exc}")
+
+            if pdf_data:
+                st.download_button(
+                    label="📄 Exportar PDF",
+                    data=pdf_data,
+                    file_name=f"relatorio_achados_criticos_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    use_container_width=True,
+                    key="download_pdf_report",
+                    help="Relatório dark mode com gráficos e dados detalhados dos pacientes comunicados.",
+                )
+            else:
+                if st.button("📄 Exportar PDF", type="primary", use_container_width=True, key="pdf_unavailable_button"):
+                    st.error("PDF indisponível. Verifique se as dependências do relatório foram instaladas.")
 
 def main():
     """Função principal do dashboard"""
