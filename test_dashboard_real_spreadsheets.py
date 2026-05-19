@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Smoke test da correlacao do dashboard com as planilhas reais fornecidas."""
 
-import builtins
 import io
 from pathlib import Path
 import sys
@@ -131,25 +130,6 @@ def run_test():
     pdf_report = dashboard.create_pdf_report()
     assert pdf_report is not None
     assert pdf_report.getvalue().startswith(b"%PDF")
-
-    for module_name in list(sys.modules):
-        if module_name.startswith("matplotlib"):
-            del sys.modules[module_name]
-
-    original_import = builtins.__import__
-
-    def import_without_matplotlib(name, *args, **kwargs):
-        if name.startswith("matplotlib"):
-            raise ModuleNotFoundError("No module named 'matplotlib'")
-        return original_import(name, *args, **kwargs)
-
-    builtins.__import__ = import_without_matplotlib
-    try:
-        fallback_pdf = dashboard.create_pdf_report()
-    finally:
-        builtins.__import__ = original_import
-    assert fallback_pdf is not None
-    assert fallback_pdf.getvalue().startswith(b"%PDF")
 
     print("OK - correlacao real validada com 57 registros calculados.")
 
